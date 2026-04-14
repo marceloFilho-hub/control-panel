@@ -1,4 +1,8 @@
-"""Entry point — inicia o orquestrador e opcionalmente o dashboard."""
+"""Entry point — inicia o orquestrador (modo idle) e o dashboard.
+
+Apps NÃO iniciam automaticamente (exceto os marcados com auto_start: true).
+O controle é feito pela interface web (dashboard) na porta 9000.
+"""
 
 from __future__ import annotations
 

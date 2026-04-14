@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════════
-# HIDRA CONTROL PLANE — Configuração de todas as automações
+# HIDRA CONTROL PLANE — Configuração de automações
 # ═══════════════════════════════════════════════════════════════
 #
 # Slots:
@@ -8,10 +8,14 @@
 #   always → Serviço permanente com auto-restart
 #
 # Schedules:
-#   "manual"                  → só roda via trigger ou dashboard
+#   "manual"                  → só roda via dashboard
 #   "loop"                    → roda continuamente com pause_between
 #   "cron(hour=7, minute=0)"  → cron-like (APScheduler)
 #   "interval(minutes=15)"    → a cada N minutos/segundos
+#
+# auto_start:
+#   false (padrão) → app fica IDLE até ser ativado pela UI
+#   true           → app inicia automaticamente ao subir o orquestrador
 # ═══════════════════════════════════════════════════════════════
 
 apps:
@@ -54,14 +58,6 @@ apps:
     max_ram_mb: 1200
     timeout: 900
 
-  rpa_dominio:
-    slot: heavy
-    cwd: "C:/Users/Rotinas/Documents/Projetos/rpa_dominio"
-    cmd: ".venv/Scripts/python main.py"
-    schedule: "manual"
-    max_ram_mb: 800
-    timeout: 3600
-
   agente_mp4:
     slot: heavy
     cwd: "C:/Users/Rotinas/Documents/Projetos/Hidra/agente_mp4"
@@ -96,22 +92,6 @@ apps:
     max_ram_mb: 512
     timeout: 300
 
-  pipeline_news:
-    slot: light
-    cwd: "C:/Users/Rotinas/Documents/Projetos/pipeline_news/tech-trends-radar"
-    cmd: ".venv/Scripts/python scripts/run_ingestion.py"
-    schedule: "cron(hour=6, minute=0)"
-    max_ram_mb: 512
-    timeout: 600
-
-  auto_jira:
-    slot: light
-    cwd: "C:/Users/Rotinas/Documents/Projetos/auto_jira"
-    cmd: ".venv/Scripts/python src/aplicação/main.py"
-    schedule: "manual"
-    max_ram_mb: 256
-    timeout: 300
-
   # ── ALWAYS: Serviços permanentes ──────────────────────────
 
   painel_bi_dash:
@@ -121,32 +101,11 @@ apps:
     max_ram_mb: 384
     restart_on_crash: true
 
-  pipeline_sgs:
-    slot: always
-    cwd: "C:/Users/Rotinas/Documents/Projetos/pipeline_SGS_API"
-    cmd: ".venv/Scripts/streamlit run src/sgs_dashboard/app.py --server.port 8503 --server.headless true"
-    max_ram_mb: 256
-    restart_on_crash: true
-
   fiscal_triagem:
     slot: always
     cwd: "C:/Users/Rotinas/Documents/Projetos/Hidra/fiscal_vs_balancete"
     cmd: ".venv/Scripts/streamlit run src/triagem/app.py --server.port 8501 --server.headless true"
     max_ram_mb: 384
-    restart_on_crash: true
-
-  cerebro_bots:
-    slot: always
-    cwd: "C:/Users/Rotinas/Documents/Projetos/cerebro/bots"
-    cmd: ".venv/Scripts/python service.py"
-    max_ram_mb: 512
-    restart_on_crash: true
-
-  cerebro_dashboard:
-    slot: always
-    cwd: "C:/Users/Rotinas/Documents/Projetos/cerebro/orquestrador"
-    cmd: ".venv/Scripts/python run_dashboard.py"
-    max_ram_mb: 128
     restart_on_crash: true
 
 # ── Alertas ──────────────────────────────────────────────────

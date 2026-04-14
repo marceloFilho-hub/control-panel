@@ -14,7 +14,8 @@ from typing import Optional
 class AppState:
     name: str
     slot: str
-    status: str = "off"  # off, queued, running, done, failed, timeout
+    status: str = "off"  # off, queued, running, done, failed, timeout, paused
+    enabled: bool = False  # se o app foi ativado pelo usuário
     pid: Optional[int] = None
     ram_mb: float = 0.0
     cpu_pct: float = 0.0
@@ -69,6 +70,7 @@ def load_state() -> ControlPlaneState:
             name=name,
             slot=app_data.get("slot", "light"),
             status=app_data.get("status", "off"),
+            enabled=app_data.get("enabled", False),
             pid=app_data.get("pid"),
             ram_mb=app_data.get("ram_mb", 0.0),
             cpu_pct=app_data.get("cpu_pct", 0.0),
@@ -94,14 +96,36 @@ def load_state() -> ControlPlaneState:
     )
 
 
-def read_commands(commands_dir: Path | None = None) -> list[str]:
+@dataclass
+class Command:
+    action: str  # start, stop, pause, resume, start_all, stop_all
+    app_name: str = ""  # vazio para comandos globais
+
+
+def write_command(commands_dir: Path, action: str, app_name: str = "") -> None:
+    """Cria um arquivo .trigger com o comando desejado."""
+    commands_dir.mkdir(exist_ok=True)
+    filename = f"{action}_{app_name}.trigger" if app_name else f"{action}.trigger"
+    (commands_dir / filename).touch()
+
+
+def read_commands(commands_dir: Path | None = None) -> list[Command]:
     """Lê e remove arquivos .trigger do diretório de comandos."""
     d = commands_dir or (Path(__file__).parent.parent / "commands")
-    triggers = []
+    commands: list[Command] = []
     if not d.exists():
-        return triggers
+        return commands
     for f in d.glob("*.trigger"):
-        app_name = f.stem.replace("run_", "")
-        triggers.append(app_name)
+        stem = f.stem
+        # Parse: action_appname ou action (global)
+        if stem in ("start_all", "stop_all"):
+            commands.append(Command(action=stem))
+        elif "_" in stem:
+            action, app_name = stem.split("_", 1)
+            if action in ("start", "stop", "pause", "resume", "run"):
+                # "run" mantido para compatibilidade
+                if action == "run":
+                    action = "start"
+                commands.append(Command(action=action, app_name=app_name))
         f.unlink()
-    return triggers
+    return commands
