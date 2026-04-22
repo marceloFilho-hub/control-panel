@@ -15,7 +15,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .executable_detector import ExecutableInfo, build_command, detect
+try:
+    from .executable_detector import ExecutableInfo, build_command, detect
+except ImportError:
+    # Permite rodar como script (streamlit importa dashboard.py diretamente)
+    from executable_detector import ExecutableInfo, build_command, detect  # type: ignore
 
 APPS_DIR = Path(__file__).parent.parent / "apps_executaveis"
 APPS_DIR.mkdir(exist_ok=True)
