@@ -55,10 +55,16 @@ def detect(path_str: str) -> ExecutableInfo:
 
     # Resolver .lnk (atalhos do Windows)
     if path.suffix.lower() == ".lnk":
-        resolved = _resolve_lnk(path)
-        if resolved:
+        try:
+            resolved = _resolve_lnk(path)
+        except Exception:
+            resolved = None
+        if resolved and isinstance(resolved, tuple) and len(resolved) == 3:
             target, args, working_dir = resolved
-            path = target
+            # Garantir strings puras Python
+            args = str(args) if args else ""
+            working_dir = str(working_dir) if working_dir else ""
+            path = target if isinstance(target, Path) else Path(str(target))
             lnk_args = args
             if working_dir:
                 lnk_cwd = Path(working_dir)
@@ -216,20 +222,24 @@ def _resolve_lnk(lnk_path: Path) -> tuple[Path, str, str] | None:
     Usa COM via pywin32 quando disponível. Caso contrário, cai para um
     parser binário simples (apenas o target).
     """
-    # 1) pywin32 (COM)
+    # 1) pywin32 (COM) — converter explicitamente tudo para str Python
     try:
         import win32com.client  # type: ignore
         shell = win32com.client.Dispatch("WScript.Shell")
         shortcut = shell.CreateShortCut(str(lnk_path))
-        target = shortcut.Targetpath or ""
-        args = shortcut.Arguments or ""
-        wd = shortcut.WorkingDirectory or ""
+        target = str(shortcut.Targetpath) if shortcut.Targetpath else ""
+        args = str(shortcut.Arguments) if shortcut.Arguments else ""
+        wd = str(shortcut.WorkingDirectory) if shortcut.WorkingDirectory else ""
+        # Liberar o objeto COM explicitamente
+        shortcut = None
+        shell = None
         if target:
             return Path(target), args, wd
     except ImportError:
         pass
-    except Exception:
-        pass
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Falha ao resolver .lnk via COM: {e}")
 
     # 2) Parser binário básico (estilo pylnk) — só extrai target se puder
     try:
