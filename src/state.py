@@ -52,12 +52,29 @@ _lock = threading.Lock()
 
 
 def save_state(state: ControlPlaneState) -> None:
-    """Salva o estado em state.json de forma thread-safe."""
+    """Salva o estado em state.json de forma thread-safe.
+
+    Usa arquivo temporário único (com PID + thread_id) para evitar colisão
+    entre chamadas concorrentes. Tolera erros de IO transitórios.
+    """
+    import os
     with _lock:
-        data = asdict(state)
-        tmp = STATE_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(STATE_FILE)
+        try:
+            data = asdict(state)
+            content = json.dumps(data, indent=2, ensure_ascii=False)
+            # Nome único por chamada para evitar race com outras writes
+            tmp = STATE_FILE.with_suffix(
+                f".tmp.{os.getpid()}.{threading.get_ident()}"
+            )
+            tmp.write_text(content, encoding="utf-8")
+            os.replace(str(tmp), str(STATE_FILE))
+        except (OSError, FileNotFoundError):
+            # Erro transitório (antivírus, file lock, etc.) — ignora neste ciclo
+            try:
+                if tmp.exists():  # type: ignore
+                    tmp.unlink()  # type: ignore
+            except Exception:
+                pass
 
 
 def load_state() -> ControlPlaneState:
