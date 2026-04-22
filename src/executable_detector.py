@@ -5,6 +5,7 @@ Suporta:
   - .exe → invoca direto
   - .bat / .cmd → cmd /c "caminho"
   - .ps1 → powershell -ExecutionPolicy Bypass -File "caminho"
+  - .vbs → cscript //nologo //B "caminho"  (modo silencioso, sem GUI)
   - .lnk → resolve o target do atalho do Windows
 """
 
@@ -17,7 +18,7 @@ from pathlib import Path
 
 @dataclass
 class ExecutableInfo:
-    kind: str  # python, exe, batch, powershell, unknown
+    kind: str  # python, exe, batch, powershell, vbs, unknown
     path: Path
     cwd: Path  # pasta pai do executável
     venv_python: Path | None = None  # .venv\Scripts\python.exe se existir
@@ -29,8 +30,20 @@ class ExecutableInfo:
             "exe": "Executável",
             "batch": "Batch",
             "powershell": "PowerShell",
+            "vbs": "VBScript",
             "unknown": "Desconhecido",
         }.get(self.kind, self.kind)
+
+    @property
+    def icon(self) -> str:
+        return {
+            "python": "🐍",
+            "exe": "⚙️",
+            "batch": "📜",
+            "powershell": "💠",
+            "vbs": "🧩",
+            "unknown": "📄",
+        }.get(self.kind, "📄")
 
 
 def detect(path_str: str) -> ExecutableInfo:
@@ -52,6 +65,7 @@ def detect(path_str: str) -> ExecutableInfo:
         ".bat": "batch",
         ".cmd": "batch",
         ".ps1": "powershell",
+        ".vbs": "vbs",
     }.get(ext, "unknown")
 
     venv_python = None
@@ -112,6 +126,12 @@ def build_command(path_str: str, arguments: str = "") -> tuple[str, str]:
         if args:
             cmd = f"{cmd} {args}"
 
+    elif info.kind == "vbs":
+        # //nologo suprime banner; //B = batch mode (sem prompts/erros em GUI)
+        cmd = f'cscript //nologo //B "{info.path}"'
+        if args:
+            cmd = f"{cmd} {args}"
+
     else:
         cmd = f'"{info.path}" {args}'.strip()
 
@@ -142,6 +162,13 @@ def parse_command(cmd: str, cwd: str) -> tuple[str, str, str]:
     # cmd /c
     if lower == "cmd" and len(parts) > 2 and parts[1].lower() == "/c":
         return parts[2].strip('"'), " ".join(parts[3:]), "batch"
+
+    # cscript / wscript (VBScript)
+    if "cscript" in lower or "wscript" in lower:
+        # achar primeiro argumento que não é flag
+        for p in parts[1:]:
+            if not p.startswith("//") and not p.startswith("/"):
+                return p.strip('"'), "", "vbs"
 
     # powershell
     if "powershell" in lower:

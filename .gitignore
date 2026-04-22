@@ -3,8 +3,10 @@ __pycache__/
 *.pyc
 .env
 logs/*.log
+logs/*/
 state.json
 commands/*.trigger
 *.egg-info/
 dist/
 build/
+.claude/

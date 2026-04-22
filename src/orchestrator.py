@@ -25,7 +25,9 @@ from pathlib import Path
 from loguru import logger
 
 from .alerter import TelegramAlerter
+from .app_discovery import APPS_DIR, scan_apps_dir, sync_config_with_pasta
 from .config_loader import ControlPlaneConfig, load_config
+from .config_writer import read_config_raw, save_config
 from .process_manager import ProcessManager
 from .resource_monitor import get_system_metrics
 from .state import (
@@ -68,6 +70,11 @@ class Orchestrator:
         self._last_config_mtime = (
             self._config_path.stat().st_mtime if self._config_path.exists() else 0.0
         )
+        # Discovery da pasta apps_executaveis/
+        self._last_pasta_mtime = (
+            APPS_DIR.stat().st_mtime if APPS_DIR.exists() else 0.0
+        )
+        self._last_pasta_signature: str = ""  # hash dos nomes pra detectar mudanças
 
     # ── Semáforos e filas ───────────────────────────────────────
 
@@ -364,6 +371,47 @@ class Orchestrator:
         self.state.light_queue = list(self._light_queue)
         self.state.memory_queue = list(self._memory_queue)
 
+    # ── Discovery da pasta apps_executaveis/ ────────────────────
+
+    def _check_pasta_changed(self) -> bool:
+        """Detecta se a pasta apps_executaveis/ teve alterações."""
+        if not APPS_DIR.exists():
+            return False
+        try:
+            current = sorted(
+                (f.name, f.stat().st_mtime)
+                for f in APPS_DIR.iterdir()
+                if f.is_file() and not f.name.startswith(".")
+            )
+            signature = str(current)
+        except Exception:
+            return False
+        if signature != self._last_pasta_signature:
+            self._last_pasta_signature = signature
+            return True
+        return False
+
+    def _sync_pasta_to_config(self, trigger_reload: bool = True) -> None:
+        """Atualiza o config.yaml com base nos arquivos da pasta apps_executaveis/.
+
+        Se trigger_reload=True (padrão), dispara hot reload para aplicar as
+        mudanças nos apps em execução. No startup (antes de _init_app_states),
+        passe False para evitar chamar reload com state vazio.
+        """
+        try:
+            raw = read_config_raw(self._config_path)
+            _, added, removed = sync_config_with_pasta(raw)
+            if added or removed:
+                save_config(self._config_path, raw)
+                logger.info(
+                    f"Pasta apps_executaveis sincronizada: +{added} -{removed}"
+                )
+                self._last_config_mtime = self._config_path.stat().st_mtime
+                if trigger_reload:
+                    self._reload_config()
+        except Exception as e:
+            logger.error(f"Falha ao sincronizar pasta: {e}")
+
     # ── Hot reload do config.yaml ───────────────────────────────
 
     def _check_config_changed(self) -> bool:
@@ -450,6 +498,11 @@ class Orchestrator:
                     self.state.apps[name].ram_mb = m.ram_mb
                     self.state.apps[name].cpu_pct = m.cpu_pct
 
+            # Discovery: pasta apps_executaveis/ mudou?
+            if self._check_pasta_changed():
+                logger.info("Mudança detectada em apps_executaveis/ — sincronizando")
+                self._sync_pasta_to_config()
+
             # Hot reload
             if self._check_config_changed():
                 logger.info("Mudança detectada em config.yaml — recarregando")
@@ -491,9 +544,21 @@ class Orchestrator:
     async def start(self) -> None:
         logger.info("=" * 60)
         logger.info("HIDRA CONTROL PLANE — Iniciando (modo idle)")
-        logger.info(f"Apps configuradas: {len(self.config.apps)}")
         logger.info(f"RAM safety margin: {self.config.ram_safety_margin_mb} MB")
         logger.info("=" * 60)
+
+        # Discovery inicial: sincroniza apps_executaveis/ com config.yaml
+        found = scan_apps_dir()
+        if found:
+            logger.info(
+                f"Encontrados {len(found)} arquivos em apps_executaveis/: "
+                + ", ".join(f.name for f in found[:5])
+                + ("..." if len(found) > 5 else "")
+            )
+        self._sync_pasta_to_config(trigger_reload=False)
+        # Re-carregar após eventual sync
+        self.config = load_config(self._config_path)
+        logger.info(f"Apps totais no config: {len(self.config.apps)}")
 
         self._init_app_states()
         await self.alerter.alert_started()

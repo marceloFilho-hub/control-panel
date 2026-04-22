@@ -4,6 +4,8 @@
 #
 # ARQUIVO GERENCIADO PELA UI
 # Edite pelo dashboard em http://localhost:9000 → aba "Configurar".
+# Edição manual é suportada, mas comentários inline serão perdidos
+# no próximo save via UI.
 #
 # Slots:
 #   heavy  → Semaphore(1) — máximo 1 job pesado por vez
@@ -11,122 +13,106 @@
 #   always → Serviço permanente com auto-restart
 #
 # Schedules:
-#   "manual"  → roda uma vez ao ativar (botão ▶)
-#   "loop"    → roda, aguarda pause_between segundos, repete
-#
-# O orquestrador NÃO cuida de horário (cron). Ele cuida de:
-#   - tempo entre rodagens (pause_between)
-#   - fila por slot (heavy=1, light=3)
-#   - fila por memória (aguarda RAM liberar antes de iniciar)
+#   "manual"                  → só roda via dashboard
+#   "loop"                    → roda continuamente com pause_between
+#   "cron(hour=7, minute=0)"  → cron-like (APScheduler)
+#   "interval(minutes=15)"    → a cada N minutos/segundos
 # ═══════════════════════════════════════════════════════════════
 
 apps:
-
-  # ── HEAVY: Jobs pesados (1 por vez) ───────────────────────
-
   dp_admissao:
     slot: heavy
-    cwd: "C:/Users/Rotinas/Documents/Projetos/DP_admissao"
-    cmd: ".venv/Scripts/python src/autoBot/app.py"
-    schedule: "loop"
-    pause_between: 600        # 10 min entre rodagens
+    cwd: C:/Users/Rotinas/Documents/Projetos/DP_admissao
+    cmd: .venv/Scripts/python src/autoBot/app.py
+    schedule: loop
+    pause_between: 600
     max_ram_mb: 1200
     timeout: 3600
-
   fiscal_xls:
     slot: heavy
-    cwd: "C:/Users/Rotinas/Documents/Projetos/Hidra/fiscal_vs_balancete"
-    cmd: ".venv/Scripts/python run_drive_xls.py"
-    schedule: "loop"
-    pause_between: 86400      # 1x por dia (24h após o fim)
+    cwd: C:/Users/Rotinas/Documents/Projetos/Hidra/fiscal_vs_balancete
+    cmd: .venv/Scripts/python run_drive_xls.py
+    schedule: loop
+    pause_between: 86400
     max_ram_mb: 1500
     timeout: 1800
-
   fiscal_pdf:
     slot: heavy
-    cwd: "C:/Users/Rotinas/Documents/Projetos/Hidra/fiscal_vs_balancete"
-    cmd: ".venv/Scripts/python run_drive_pdf.py"
-    schedule: "loop"
-    pause_between: 86400      # 1x por dia
+    cwd: C:/Users/Rotinas/Documents/Projetos/Hidra/fiscal_vs_balancete
+    cmd: .venv/Scripts/python run_drive_pdf.py
+    schedule: loop
+    pause_between: 86400
     max_ram_mb: 1000
     timeout: 1200
-
   criar_ticket:
     slot: heavy
-    cwd: "C:/Users/Rotinas/Documents/Projetos/Hidra/criar_ticket_sustentacao"
-    cmd: ".venv/Scripts/python main.py"
-    schedule: "manual"
+    cwd: C:/Users/Rotinas/Documents/Projetos/Hidra/criar_ticket_sustentacao
+    cmd: .venv/Scripts/python main.py
+    schedule: manual
     max_ram_mb: 1200
     timeout: 900
-
   agente_mp4:
     slot: heavy
-    cwd: "C:/Users/Rotinas/Documents/Projetos/Hidra/agente_mp4"
-    cmd: ".venv/Scripts/streamlit run app.py --server.port 8505"
-    schedule: "manual"
+    cwd: C:/Users/Rotinas/Documents/Projetos/Hidra/agente_mp4
+    cmd: .venv/Scripts/streamlit run app.py --server.port 8505
+    schedule: manual
     max_ram_mb: 2000
     timeout: 7200
-
-  # ── LIGHT: Jobs leves (até 3 paralelos) ───────────────────
-
   mensageiro:
     slot: light
-    cwd: "C:/Users/Rotinas/Documents/Projetos/Hidra/mensageiro"
-    cmd: ".venv/Scripts/python src/main.py"
-    schedule: "loop"
-    pause_between: 900        # a cada 15 min após o fim
+    cwd: C:/Users/Rotinas/Documents/Projetos/Hidra/mensageiro
+    cmd: .venv/Scripts/python src/main.py
+    schedule: loop
+    pause_between: 900
     max_ram_mb: 256
     timeout: 120
-
   cadastro_contribuinte:
     slot: light
-    cwd: "C:/Users/Rotinas/Documents/Projetos/cadastro_contribuinte"
-    cmd: ".venv/Scripts/python src/logica/monitor_email.py --once"
-    schedule: "loop"
-    pause_between: 60         # verifica emails a cada 60s (efêmero com --once)
+    cwd: C:/Users/Rotinas/Documents/Projetos/cadastro_contribuinte
+    cmd: .venv/Scripts/python src/logica/monitor_email.py --once
+    schedule: loop
+    pause_between: 60
     max_ram_mb: 256
     timeout: 60
-
   painel_bi_etl:
     slot: light
-    cwd: "C:/Users/Rotinas/Documents/Projetos/Hidra/painel_bi"
-    cmd: ".venv/Scripts/python src/main.py"
-    schedule: "loop"
-    pause_between: 3600       # a cada 1h após o fim
+    cwd: C:/Users/Rotinas/Documents/Projetos/Hidra/painel_bi
+    cmd: .venv/Scripts/python src/main.py
+    schedule: loop
+    pause_between: 3600
     max_ram_mb: 512
     timeout: 300
-
-  # ── ALWAYS: Serviços permanentes ──────────────────────────
-
   painel_bi_dash:
     slot: always
-    cwd: "C:/Users/Rotinas/Documents/Projetos/Hidra/painel_bi"
-    cmd: ".venv/Scripts/streamlit run app.py --server.port 8502 --server.headless true"
+    cwd: C:/Users/Rotinas/Documents/Projetos/Hidra/painel_bi
+    cmd: .venv/Scripts/streamlit run app.py --server.port 8502 --server.headless true
     max_ram_mb: 384
     restart_on_crash: true
-
   fiscal_triagem:
     slot: always
-    cwd: "C:/Users/Rotinas/Documents/Projetos/Hidra/fiscal_vs_balancete"
-    cmd: ".venv/Scripts/streamlit run src/triagem/app.py --server.port 8501 --server.headless true"
+    cwd: C:/Users/Rotinas/Documents/Projetos/Hidra/fiscal_vs_balancete
+    cmd: .venv/Scripts/streamlit run src/triagem/app.py --server.port 8501 --server.headless
+      true
     max_ram_mb: 384
     restart_on_crash: true
-
-# ── Alertas ──────────────────────────────────────────────────
-
+  exemplo_hello:
+    slot: light
+    cwd: C:/Users/marcelo.lsantos_bhub/Documents/automacoes/control_panel/apps_executaveis
+    cmd: cscript //nologo //B "C:\Users\marcelo.lsantos_bhub\Documents\automacoes\control_panel\apps_executaveis\exemplo_hello.vbs"
+    schedule: manual
+    max_ram_mb: 512
+    timeout: 600
+    _source: pasta
 alerts:
-  telegram_bot_token: "${TELEGRAM_BOT_TOKEN}"
-  telegram_chat_id: "${TELEGRAM_CHAT_ID}"
+  telegram_bot_token: ${TELEGRAM_BOT_TOKEN}
+  telegram_chat_id: ${TELEGRAM_CHAT_ID}
   on_failure: true
   on_timeout: true
   on_ram_exceeded: true
-
-# ── Configurações gerais ─────────────────────────────────────
-
 settings:
-  log_dir: "logs/"
-  log_rotation: "10 MB"
+  log_dir: logs/
+  log_rotation: 10 MB
   log_retention: 30
   heavy_slots: 1
   light_slots: 3
-  ram_safety_margin_mb: 512   # RAM reservada ao SO — apps aguardam se available - margin < max_ram_mb
+  ram_safety_margin_mb: 512

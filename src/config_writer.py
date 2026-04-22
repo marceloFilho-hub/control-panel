@@ -14,8 +14,10 @@ HEADER = """\
 #
 # ARQUIVO GERENCIADO PELA UI
 # Edite pelo dashboard em http://localhost:9000 → aba "Configurar".
-# Edição manual é suportada, mas comentários inline serão perdidos
-# no próximo save via UI.
+#
+# Apps marcados com _source: pasta vêm da pasta apps_executaveis/
+# e são descobertos automaticamente — solte um .vbs/.exe/.bat/.ps1
+# lá e ele aparece aqui.
 #
 # Slots:
 #   heavy  → Semaphore(1) — máximo 1 job pesado por vez
@@ -23,10 +25,13 @@ HEADER = """\
 #   always → Serviço permanente com auto-restart
 #
 # Schedules:
-#   "manual"                  → só roda via dashboard
-#   "loop"                    → roda continuamente com pause_between
-#   "cron(hour=7, minute=0)"  → cron-like (APScheduler)
-#   "interval(minutes=15)"    → a cada N minutos/segundos
+#   "manual" → roda uma vez ao ativar (botão ▶)
+#   "loop"   → roda, aguarda pause_between segundos, repete
+#
+# O orquestrador NÃO cuida de horário (cron). Ele cuida de:
+#   - tempo entre rodagens (pause_between)
+#   - fila por slot (heavy=1, light=3)
+#   - fila por memória (aguarda RAM liberar antes de iniciar)
 # ═══════════════════════════════════════════════════════════════
 
 """
