@@ -24,18 +24,18 @@ COMMANDS_DIR = ROOT / "commands"
 CONFIG_PATH = ROOT / "config.yaml"
 COMMANDS_DIR.mkdir(exist_ok=True)
 
-# ── Cores do dark mode padrão BHub ───────────────────────────
-BG_BASE = "#0F172A"
-BG_CARD = "#1E293B"
-BG_CARD2 = "#263348"
-BORDER = "#334155"
-TEXT_MAIN = "#F1F5F9"
-TEXT_MUTED = "#94A3B8"
-TEXT_LABEL = "#CBD5E1"
-SUCCESS = "#10B981"
-ERROR = "#EF4444"
-WARNING = "#F59E0B"
-INFO = "#3B82F6"
+# ── Cores do tema LIGHT ──────────────────────────────────────
+BG_BASE = "#F8FAFC"     # fundo principal (branco suave)
+BG_CARD = "#FFFFFF"     # cards
+BG_CARD2 = "#F1F5F9"    # cabeçalhos/linhas alternadas
+BORDER = "#E2E8F0"      # bordas
+TEXT_MAIN = "#0F172A"   # texto principal (quase preto)
+TEXT_MUTED = "#64748B"  # texto secundário (cinza médio)
+TEXT_LABEL = "#475569"  # labels
+SUCCESS = "#059669"     # verde (emerald 600)
+ERROR = "#DC2626"       # vermelho (red 600)
+WARNING = "#D97706"     # âmbar (amber 600)
+INFO = "#2563EB"        # azul (blue 600)
 
 STATUS_COLORS = {
     "running": SUCCESS,
@@ -457,7 +457,6 @@ def _render_pasta_row(app, existing: dict, state: ControlPlaneState) -> None:
                 f"✅ '{app.name}' salvo — hot reload em até 5s"
                 + (" (vai começar a rodar)" if enabled else " (ficou em modo manual)")
             )
-            time.sleep(0.7)
             st.rerun()
 
         # Botões Start/Stop inline (atalhos pra aba Status)
@@ -631,13 +630,14 @@ def main() -> None:
         initial_sidebar_state="collapsed",
     )
 
+    # CSS mínimo — o tema light já vem do .streamlit/config.toml
     st.markdown(f"""
     <style>
-        .stApp {{ background-color: {BG_BASE}; color: {TEXT_MAIN}; }}
-        .stMetric label {{ color: {TEXT_MUTED} !important; }}
-        section[data-testid="stSidebar"] {{ background-color: {BG_CARD}; }}
+        div[data-testid="column"] button {{
+            padding: 0.2rem 0.5rem;
+            min-height: 0;
+        }}
         .stProgress > div > div {{ background-color: {INFO}; }}
-        div[data-testid="column"] button {{ padding: 0.2rem 0.5rem; min-height: 0; }}
     </style>
     """, unsafe_allow_html=True)
 
