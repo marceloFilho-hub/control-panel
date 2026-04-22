@@ -15,6 +15,7 @@ from config_writer import (
     read_config_raw,
     upsert_app,
 )
+from executable_detector import build_command, detect, parse_command
 from state import AppState, ControlPlaneState, load_state, write_command
 
 ROOT = Path(__file__).parent.parent
@@ -298,6 +299,16 @@ def _render_app_form(app_name: str | None, existing: dict | None) -> None:
     existing = existing or {}
     form_key = f"form_{app_name or 'new'}"
 
+    # Extrair path/args existente do comando salvo (para edição)
+    existing_exe = ""
+    existing_args = ""
+    if is_edit and existing.get("cmd"):
+        existing_exe, existing_args, _ = parse_command(
+            existing.get("cmd", ""), existing.get("cwd", "")
+        )
+        if existing_exe and not Path(existing_exe).is_absolute():
+            existing_exe = str(Path(existing.get("cwd", "")) / existing_exe).replace("\\", "/")
+
     with st.form(form_key, clear_on_submit=not is_edit):
         cols = st.columns(2)
         with cols[0]:
@@ -316,16 +327,37 @@ def _render_app_form(app_name: str | None, existing: dict | None) -> None:
                 help="heavy = 1 por vez | light = até 3 paralelos | always = permanente",
             )
 
-        cwd_input = st.text_input(
-            "Caminho do projeto (cwd) *",
-            value=existing.get("cwd", ""),
-            placeholder="C:/Users/Rotinas/Documents/Projetos/meu_projeto",
+        st.markdown("**\U0001f4c2 Arquivo a executar**")
+        exe_input = st.text_input(
+            "Caminho do executável *",
+            value=existing_exe,
+            placeholder="C:/Users/Rotinas/Desktop/meu_robo.exe  |  .bat  |  .ps1  |  .py",
+            help=(
+                "Cole o caminho completo do arquivo. Suporta: .exe, .bat, .cmd, .ps1, .py, .lnk. "
+                "O tipo é detectado pela extensão e o comando é montado automaticamente."
+            ),
+            key=f"exe_{form_key}",
         )
-        cmd_input = st.text_input(
-            "Comando *",
-            value=existing.get("cmd", ""),
-            placeholder=".venv/Scripts/python src/main.py",
+        args_input = st.text_input(
+            "Argumentos (opcional)",
+            value=existing_args,
+            placeholder="ex: --once --verbose",
+            key=f"args_{form_key}",
         )
+
+        # Preview do comando gerado
+        if exe_input.strip():
+            try:
+                info = detect(exe_input.strip())
+                preview_cmd, preview_cwd = build_command(exe_input.strip(), args_input.strip())
+                st.caption(
+                    f"Tipo detectado: **{info.display_kind}** "
+                    + ("(com .venv) " if info.venv_python else "")
+                    + f"| cwd: `{preview_cwd}`"
+                )
+                st.code(preview_cmd, language="bash")
+            except Exception as e:
+                st.caption(f"⚠️ Não foi possível analisar: {e}")
 
         st.markdown("**\U0001f4c5 Agendamento**")
         schedule_current = existing.get("schedule", "manual")
@@ -447,13 +479,16 @@ def _render_app_form(app_name: str | None, existing: dict | None) -> None:
             )
 
         if submit:
-            if not name_input or not cwd_input or not cmd_input:
-                st.error("Campos obrigatórios: nome, caminho e comando")
+            if not name_input or not exe_input.strip():
+                st.error("Campos obrigatórios: nome e caminho do executável")
             else:
+                generated_cmd, generated_cwd = build_command(
+                    exe_input.strip(), args_input.strip()
+                )
                 app_data = {
                     "slot": slot_input,
-                    "cwd": cwd_input,
-                    "cmd": cmd_input,
+                    "cwd": generated_cwd,
+                    "cmd": generated_cmd,
                     "schedule": schedule_value,
                     "max_ram_mb": int(max_ram),
                     "timeout": int(timeout),
