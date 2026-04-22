@@ -16,6 +16,12 @@ from config_writer import (
     upsert_app,
 )
 from executable_detector import build_command, detect, parse_command
+from execution_logger import (
+    get_latest_log_path,
+    list_apps_with_logs,
+    read_history,
+    read_log_content,
+)
 from state import AppState, ControlPlaneState, load_state, write_command
 
 ROOT = Path(__file__).parent.parent
@@ -516,28 +522,136 @@ def _render_app_form(app_name: str | None, existing: dict | None) -> None:
 # MAIN
 # ═══════════════════════════════════════════════════════════════
 
-def render_history(state: ControlPlaneState) -> None:
-    completed = [
-        a for a in state.apps.values()
-        if a.finished_at and a.status in ("done", "failed", "timeout")
-    ]
-    completed.sort(key=lambda a: a.finished_at or 0, reverse=True)
+def render_live_view(state: ControlPlaneState) -> None:
+    """Aba ao vivo — stream do log da última execução do app selecionado."""
+    st.markdown("### 📺 Execução ao vivo")
 
-    if not completed:
-        st.info("Nenhuma execução concluída ainda.")
+    apps_with_logs = list_apps_with_logs()
+    # Priorizar apps em execução no topo do seletor
+    running_apps = [name for name, a in state.apps.items() if a.status == "running"]
+    other_apps = [a for a in apps_with_logs if a not in running_apps]
+    options = running_apps + other_apps
+
+    if not options:
+        st.info("Nenhuma execução registrada ainda. Inicie um app para ver logs aqui.")
         return
 
-    for app in completed[:10]:
-        icon = STATUS_ICONS.get(app.status, "?")
-        color = STATUS_COLORS.get(app.status, TEXT_MUTED)
-        duration = format_duration(app.last_duration_s)
-        finished = format_time(app.finished_at)
+    format_option = lambda name: (
+        f"🟢 {name} (rodando)" if name in running_apps else f"⚪ {name}"
+    )
+
+    selected = st.selectbox(
+        "App para monitorar",
+        options=options,
+        format_func=format_option,
+        key="live_app_select",
+    )
+
+    if not selected:
+        return
+
+    log_path = get_latest_log_path(selected)
+    if not log_path:
+        st.info(f"Sem logs para '{selected}' ainda.")
+        return
+
+    # Metadados da última execução
+    recs = read_history(selected, limit=1)
+    if recs:
+        r = recs[0]
+        status_color = STATUS_COLORS.get(r.status, TEXT_MUTED)
+        icon = STATUS_ICONS.get(r.status, "?")
+        cols = st.columns(4)
+        with cols[0]:
+            st.markdown(
+                f"**Status:** <span style='color:{status_color}'>{icon} {r.status}</span>",
+                unsafe_allow_html=True,
+            )
+        with cols[1]:
+            st.markdown(f"**Início:** {r.started_at_str}")
+        with cols[2]:
+            st.markdown(f"**Duração:** {format_duration(r.duration_s)}")
+        with cols[3]:
+            st.markdown(
+                f"**Pico RAM:** {r.peak_ram_mb:.0f} MB"
+                if r.peak_ram_mb > 0
+                else "**Pico RAM:** —"
+            )
+
+    st.caption(f"📄 `{log_path}`")
+
+    # Stream do log (últimos 64 KB)
+    content = read_log_content(log_path, tail_kb=64)
+    st.code(content, language=None, line_numbers=False)
+
+
+def render_history_rich(_state: ControlPlaneState) -> None:
+    """Histórico detalhado por app com drill-down em cada execução."""
+    st.markdown("### \U0001f4dc Histórico detalhado")
+
+    apps_with_logs = list_apps_with_logs()
+    if not apps_with_logs:
+        st.info("Nenhuma execução registrada ainda.")
+        return
+
+    # Resumo rápido: última execução de cada app
+    st.markdown("#### Última execução por app")
+    for app_name in apps_with_logs:
+        recs = read_history(app_name, limit=1)
+        if not recs:
+            continue
+        r = recs[0]
+        color = STATUS_COLORS.get(r.status, TEXT_MUTED)
+        icon = STATUS_ICONS.get(r.status, "?")
         st.markdown(
             f"<span style='color:{color}'>{icon}</span> "
-            f"**{app.name}** — {app.status} — {duration} — {finished}"
-            + (f" — `{app.last_error[:80]}`" if app.last_error else ""),
+            f"**{app_name}** — {r.status} — {format_duration(r.duration_s)} — "
+            f"{r.started_at_str}"
+            + (f" — `{r.error[:80]}`" if r.error else ""),
             unsafe_allow_html=True,
         )
+
+    st.divider()
+    st.markdown("#### Drill-down")
+    selected = st.selectbox(
+        "Ver histórico completo de:",
+        options=apps_with_logs,
+        key="history_app_select",
+    )
+    if not selected:
+        return
+
+    recs = read_history(selected, limit=50)
+    if not recs:
+        st.info(f"Sem histórico para '{selected}'.")
+        return
+
+    st.caption(f"Últimas {len(recs)} execuções de **{selected}**")
+    for r in recs:
+        color = STATUS_COLORS.get(r.status, TEXT_MUTED)
+        icon = STATUS_ICONS.get(r.status, "?")
+        label = (
+            f"{icon} {r.started_at_str} — {r.status} — "
+            f"{format_duration(r.duration_s)}"
+            + (f" (exit {r.exit_code})" if r.exit_code not in (None, 0) else "")
+        )
+        with st.expander(label):
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.markdown(f"**exec_id:** `{r.exec_id}`")
+            with c2:
+                st.markdown(f"**PID:** {r.pid or '—'}")
+            with c3:
+                st.markdown(f"**Pico RAM:** {r.peak_ram_mb:.0f} MB")
+            with c4:
+                st.markdown(f"**Exit:** {r.exit_code}")
+            if r.error:
+                st.error(r.error)
+            if r.log_file and Path(r.log_file).exists():
+                st.markdown("**Log completo:**")
+                st.code(read_log_content(r.log_file, tail_kb=128))
+            else:
+                st.caption("(arquivo de log não disponível)")
 
 
 def main() -> None:
@@ -562,7 +676,13 @@ def main() -> None:
 
     state = load_state()
 
-    tabs = st.tabs(["\U0001f4ca Status", "\U0001f4cb Fila", "⚙️ Configurar", "\U0001f4dc Histórico"])
+    tabs = st.tabs([
+        "\U0001f4ca Status",
+        "\U0001f4fa Ao vivo",
+        "\U0001f4cb Fila",
+        "⚙️ Configurar",
+        "\U0001f4dc Histórico",
+    ])
 
     with tabs[0]:
         if not state.apps:
@@ -577,16 +697,19 @@ def main() -> None:
             render_app_table(state)
 
     with tabs[1]:
+        render_live_view(state)
+
+    with tabs[2]:
         if not state.apps:
             st.warning("Orquestrador não iniciado.")
         else:
             render_queue_view(state)
 
-    with tabs[2]:
+    with tabs[3]:
         render_config_tab()
 
-    with tabs[3]:
-        render_history(state)
+    with tabs[4]:
+        render_history_rich(state)
 
     # Auto-refresh a cada 5s apenas nas abas operacionais
     time.sleep(5)

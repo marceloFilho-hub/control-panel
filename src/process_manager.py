@@ -12,6 +12,7 @@ from loguru import logger
 
 from .alerter import TelegramAlerter
 from .config_loader import AppConfig
+from .execution_logger import ExecutionLogger
 from .resource_monitor import get_process_metrics, kill_process_tree
 from .state import AppState
 
@@ -24,6 +25,8 @@ class ProcessManager:
         self.state = app_state
         self.alerter = alerter
         self._process: asyncio.subprocess.Process | None = None
+        self._exec_logger: ExecutionLogger | None = None
+        self._peak_ram_mb: float = 0.0
 
     async def start(self) -> int | None:
         """Inicia o processo e retorna o PID."""
@@ -45,6 +48,11 @@ class ProcessManager:
         env = {**os.environ, "PYTHONUTF8": "1", **self.cfg.env}
 
         logger.info(f"[{self.cfg.name}] Iniciando: {self.cfg.cmd} em {cwd}")
+
+        # Abrir logger de execução (cria o arquivo por run)
+        self._exec_logger = ExecutionLogger(self.cfg.name)
+        self._peak_ram_mb = 0.0
+
         try:
             self._process = await asyncio.create_subprocess_exec(
                 *parts,
@@ -57,6 +65,8 @@ class ProcessManager:
             logger.error(f"[{self.cfg.name}] Falha ao iniciar: {e}")
             self.state.status = "failed"
             self.state.last_error = str(e)
+            if self._exec_logger:
+                self._exec_logger.close(status="failed", exit_code=-1, error=str(e))
             await self.alerter.alert_failure(self.cfg.name, -1, str(e))
             return None
 
@@ -64,8 +74,27 @@ class ProcessManager:
         self.state.status = "running"
         self.state.started_at = time.time()
         self.state.last_error = ""
+        self._exec_logger.record.pid = self._process.pid
+
+        # Stream stdout/stderr para o arquivo de log em tempo real
+        asyncio.create_task(self._stream_output(self._process.stdout, b"[out] "))
+        asyncio.create_task(self._stream_output(self._process.stderr, b"[err] "))
+
         logger.info(f"[{self.cfg.name}] PID {self._process.pid} iniciado")
         return self._process.pid
+
+    async def _stream_output(self, stream: asyncio.StreamReader | None, prefix: bytes) -> None:
+        """Lê a stream do subprocesso linha a linha e grava no log."""
+        if stream is None or self._exec_logger is None:
+            return
+        try:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                self._exec_logger.write(prefix + line)
+        except Exception:
+            pass
 
     async def wait_with_monitoring(self) -> int:
         """Aguarda o processo terminar, monitorando RAM e timeout."""
@@ -98,6 +127,13 @@ class ProcessManager:
                     kill_process_tree(pid)
                     self.state.status = "timeout"
                     self.state.last_error = f"Timeout após {elapsed:.0f}s"
+                    if self._exec_logger:
+                        self._exec_logger.close(
+                            status="timeout",
+                            exit_code=-1,
+                            error=f"Timeout após {elapsed:.0f}s",
+                            peak_ram_mb=self._peak_ram_mb,
+                        )
                     await self.alerter.alert_timeout(self.cfg.name, timeout)
                     return -1
 
@@ -108,6 +144,8 @@ class ProcessManager:
 
                 self.state.ram_mb = metrics.ram_mb
                 self.state.cpu_pct = metrics.cpu_pct
+                if metrics.ram_mb > self._peak_ram_mb:
+                    self._peak_ram_mb = metrics.ram_mb
 
                 if metrics.ram_mb > max_ram:
                     logger.warning(
@@ -116,6 +154,13 @@ class ProcessManager:
                     kill_process_tree(pid)
                     self.state.status = "failed"
                     self.state.last_error = f"RAM excedida: {metrics.ram_mb:.0f}MB"
+                    if self._exec_logger:
+                        self._exec_logger.close(
+                            status="failed",
+                            exit_code=-1,
+                            error=f"RAM excedida: {metrics.ram_mb:.0f}MB",
+                            peak_ram_mb=self._peak_ram_mb,
+                        )
                     await self.alerter.alert_ram(
                         self.cfg.name, metrics.ram_mb, max_ram
                     )
@@ -127,17 +172,6 @@ class ProcessManager:
         # Coletar resultado
         exit_code = self._process.returncode or 0
         duration = time.time() - start_time
-
-        # Capturar stderr para diagnóstico
-        stderr_output = ""
-        if self._process.stderr:
-            try:
-                stderr_bytes = await asyncio.wait_for(
-                    self._process.stderr.read(), timeout=5.0
-                )
-                stderr_output = stderr_bytes.decode("utf-8", errors="replace")[-2000:]
-            except Exception:
-                pass
 
         self.state.finished_at = time.time()
         self.state.last_duration_s = duration
@@ -152,15 +186,36 @@ class ProcessManager:
             logger.info(
                 f"[{self.cfg.name}] Concluído em {duration:.1f}s (exit 0)"
             )
+            if self._exec_logger:
+                self._exec_logger.close(
+                    status="done", exit_code=0, peak_ram_mb=self._peak_ram_mb
+                )
         else:
             self.state.status = "failed"
             self.state.fail_count += 1
-            self.state.last_error = stderr_output[:500] or f"Exit code {exit_code}"
+            # Ler últimas linhas do log pra mensagem de erro
+            err_snippet = ""
+            if self._exec_logger:
+                try:
+                    from .execution_logger import read_log_content
+                    content = read_log_content(self._exec_logger.record.log_file, tail_kb=4)
+                    err_lines = [l for l in content.splitlines() if l.startswith("[err]")]
+                    err_snippet = "\n".join(err_lines[-20:])[:500]
+                except Exception:
+                    pass
+            self.state.last_error = err_snippet or f"Exit code {exit_code}"
             logger.error(
                 f"[{self.cfg.name}] Falhou em {duration:.1f}s (exit {exit_code})"
             )
+            if self._exec_logger:
+                self._exec_logger.close(
+                    status="failed",
+                    exit_code=exit_code,
+                    error=err_snippet,
+                    peak_ram_mb=self._peak_ram_mb,
+                )
             await self.alerter.alert_failure(
-                self.cfg.name, exit_code, stderr_output[:500]
+                self.cfg.name, exit_code, err_snippet
             )
 
         return exit_code
@@ -180,3 +235,11 @@ class ProcessManager:
             self.state.pid = None
             self.state.ram_mb = 0
             self.state.cpu_pct = 0
+        if self._exec_logger:
+            self._exec_logger.close(
+                status="killed",
+                exit_code=None,
+                error="Encerrado manualmente",
+                peak_ram_mb=self._peak_ram_mb,
+            )
+            self._exec_logger = None
