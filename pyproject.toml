@@ -4,13 +4,14 @@ version = "1.0.0"
 description = "Orquestrador central para todas as automações — scheduler, fila, monitor, dashboard"
 requires-python = ">=3.10"
 dependencies = [
-    "apscheduler>=3.10.0",
     "psutil>=5.9.0",
     "pyyaml>=6.0",
     "httpx>=0.27.0",
     "loguru>=0.7.0",
     "streamlit>=1.35.0",
+    "streamlit-autorefresh>=1.0.0",
     "python-dotenv>=1.0.0",
+    "pywin32>=305; platform_system=='Windows'",
 ]
 
 [project.scripts]

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import time
 from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 from app_discovery import APPS_DIR, scan_apps_dir
 from config_writer import read_config_raw, upsert_app
@@ -104,13 +104,13 @@ def render_kpi_row(state: ControlPlaneState) -> None:
     with cols[2]:
         st.metric("Rodando", running)
     with cols[3]:
-        st.metric("Fila RAM", waiting_mem)
+        st.metric("Fila Memória", waiting_mem)
     with cols[4]:
         st.metric("Falhas", failed)
     with cols[5]:
-        st.metric("RAM usada", f"{state.total_ram_mb / 1024:.1f} GB")
+        st.metric("Mem. usada", f"{state.total_ram_mb / 1024:.1f} GB")
     with cols[6]:
-        st.metric("RAM livre", f"{state.available_ram_mb / 1024:.1f} GB")
+        st.metric("Mem. livre", f"{state.available_ram_mb / 1024:.1f} GB")
     with cols[7]:
         st.metric("CPU VM", f"{state.total_cpu_pct:.0f}%")
 
@@ -158,7 +158,7 @@ def render_app_table(state: ControlPlaneState) -> None:
             continue
         st.markdown(f"### {section_name}")
         cols = st.columns([2.5, 1.2, 0.8, 0.8, 1.2, 1.2, 2.3])
-        headers = ["App", "Status", "RAM", "CPU", "Hora", "Proximo", "Controles"]
+        headers = ["App", "Status", "Memória", "CPU", "Hora", "Próximo", "Controles"]
         for col, header in zip(cols, headers):
             with col:
                 st.caption(f"**{header}**")
@@ -234,7 +234,7 @@ def render_queue_view(state: ControlPlaneState) -> None:
     safety_mb = state.ram_safety_margin_mb
     usable_mb = max(0.0, state.available_ram_mb - safety_mb)
     st.markdown(
-        f"**RAM disponível:** {available_gb:.2f} GB "
+        f"**Memória disponível:** {available_gb:.2f} GB "
         f"(**{usable_mb:.0f} MB utilizáveis** após margem de {safety_mb} MB para o SO)"
     )
 
@@ -259,7 +259,7 @@ def render_queue_view(state: ControlPlaneState) -> None:
     st.divider()
     st.markdown("### \U0001f9e0 Fila de memória")
     st.caption(
-        "Apps que já conquistaram o slot mas estão aguardando RAM suficiente "
+        "Apps que já conquistaram o slot mas estão aguardando memória suficiente "
         "para iniciar com segurança."
     )
     if not state.memory_queue:
@@ -412,10 +412,10 @@ def _render_pasta_row(app, existing: dict, state: ControlPlaneState) -> None:
                 help="heavy = 1 por vez | light = até 3 paralelos | always = permanente",
             )
 
-        # 4) RAM máxima
+        # 4) Memória máxima
         with c4:
             ram = st.number_input(
-                "RAM máx (MB)",
+                "Memória máx (MB)",
                 min_value=64,
                 max_value=16384,
                 value=current_ram,
@@ -541,9 +541,9 @@ def render_live_view(state: ControlPlaneState) -> None:
             st.markdown(f"**Duração:** {format_duration(r.duration_s)}")
         with cols[3]:
             st.markdown(
-                f"**Pico RAM:** {r.peak_ram_mb:.0f} MB"
+                f"**Pico Memória:** {r.peak_ram_mb:.0f} MB"
                 if r.peak_ram_mb > 0
-                else "**Pico RAM:** —"
+                else "**Pico Memória:** —"
             )
 
     st.caption(f"📄 `{log_path}`")
@@ -610,7 +610,7 @@ def render_history_rich(_state: ControlPlaneState) -> None:
             with c2:
                 st.markdown(f"**PID:** {r.pid or '—'}")
             with c3:
-                st.markdown(f"**Pico RAM:** {r.peak_ram_mb:.0f} MB")
+                st.markdown(f"**Pico Memória:** {r.peak_ram_mb:.0f} MB")
             with c4:
                 st.markdown(f"**Exit:** {r.exit_code}")
             if r.error:
@@ -630,9 +630,19 @@ def main() -> None:
         initial_sidebar_state="collapsed",
     )
 
+    # Desabilitar tradutor do navegador (evita RAM → "bater" etc.)
+    st.markdown(
+        """
+        <meta name="google" content="notranslate">
+        <meta http-equiv="Content-Language" content="pt-BR">
+        """,
+        unsafe_allow_html=True,
+    )
     # CSS mínimo — o tema light já vem do .streamlit/config.toml
     st.markdown(f"""
     <style>
+        html {{ translate: no; }}
+        .notranslate {{ translate: no; }}
         div[data-testid="column"] button {{
             padding: 0.2rem 0.5rem;
             min-height: 0;
@@ -680,9 +690,9 @@ def main() -> None:
     with tabs[4]:
         render_history_rich(state)
 
-    # Auto-refresh a cada 5s apenas nas abas operacionais
-    time.sleep(5)
-    st.rerun()
+    # Auto-refresh gerenciado pelo componente oficial (sem conflito com DOM
+    # do React durante interações em widgets). 10s é suave e não dá race.
+    st_autorefresh(interval=10000, key="main_refresh")
 
 
 if __name__ == "__main__":
