@@ -17,7 +17,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
 
 from .alerter import TelegramAlerter
-from .config_loader import AppConfig, ControlPlaneConfig
+from .config_loader import AppConfig, ControlPlaneConfig, load_config
 from .process_manager import ProcessManager
 from .resource_monitor import get_system_metrics
 from .state import (
@@ -49,6 +49,12 @@ class Orchestrator:
         self._app_tasks: dict[str, asyncio.Task] = {}
         self._commands_dir = Path(__file__).parent.parent / "commands"
         self._commands_dir.mkdir(exist_ok=True)
+        # Filas FIFO rastreáveis (espelham a ordem dos Semaphores)
+        self._heavy_queue: list[str] = []
+        self._light_queue: list[str] = []
+        # Hot reload do config.yaml
+        self._config_path = Path(__file__).parent.parent / "config.yaml"
+        self._last_config_mtime = self._config_path.stat().st_mtime if self._config_path.exists() else 0.0
 
     def _get_semaphore(self, slot: str) -> asyncio.Semaphore | None:
         if slot == "heavy":
@@ -56,6 +62,13 @@ class Orchestrator:
         elif slot == "light":
             return self.light_sem
         return None  # always — sem semáforo
+
+    def _get_queue(self, slot: str) -> list[str] | None:
+        if slot == "heavy":
+            return self._heavy_queue
+        elif slot == "light":
+            return self._light_queue
+        return None
 
     def _init_app_states(self) -> None:
         for name, cfg in self.config.apps.items():
@@ -97,11 +110,18 @@ class Orchestrator:
             return
 
         app_state.status = "queued"
+        # Adicionar à fila FIFO rastreável
+        queue = self._get_queue(cfg.slot)
+        if queue is not None and app_name not in queue:
+            queue.append(app_name)
         save_state(self.state)
 
         if sem:
             logger.debug(f"[{app_name}] Aguardando slot {cfg.slot}...")
             await sem.acquire()
+            # Remover da fila ao conseguir slot
+            if queue is not None and app_name in queue:
+                queue.remove(app_name)
             self._update_slot_counts()
 
         try:
@@ -315,6 +335,83 @@ class Orchestrator:
         light_max = self.config.light_slots
         self.state.heavy_slots_used = heavy_max - self.heavy_sem._value
         self.state.light_slots_used = light_max - self.light_sem._value
+        self.state.heavy_queue = list(self._heavy_queue)
+        self.state.light_queue = list(self._light_queue)
+
+    # ── Hot reload do config.yaml ───────────────────────────────
+
+    def _check_config_changed(self) -> bool:
+        """Retorna True se config.yaml foi modificado desde o último load."""
+        if not self._config_path.exists():
+            return False
+        current_mtime = self._config_path.stat().st_mtime
+        if current_mtime > self._last_config_mtime:
+            self._last_config_mtime = current_mtime
+            self.state.config_mtime = current_mtime
+            return True
+        return False
+
+    def _reload_config(self) -> None:
+        """Recarrega config.yaml e aplica diff sem reiniciar processos."""
+        try:
+            new_config = load_config(self._config_path)
+        except Exception as e:
+            logger.error(f"Falha ao recarregar config.yaml: {e}")
+            return
+
+        old_apps = set(self.config.apps.keys())
+        new_apps = set(new_config.apps.keys())
+
+        added = new_apps - old_apps
+        removed = old_apps - new_apps
+        common = old_apps & new_apps
+
+        # Apps removidos: desabilitar e limpar estado
+        for name in removed:
+            logger.info(f"[{name}] Removido do config.yaml — desabilitando")
+            if self.state.apps.get(name) and self.state.apps[name].enabled:
+                self._disable_app(name)
+            self.state.apps.pop(name, None)
+
+        # Apps novos: registrar no state
+        for name in added:
+            cfg = new_config.apps[name]
+            logger.info(f"[{name}] Novo app detectado — slot={cfg.slot}, schedule={cfg.schedule}")
+            self.state.apps[name] = AppState(name=name, slot=cfg.slot)
+
+        # Apps alterados: detectar mudanças relevantes
+        changed = []
+        for name in common:
+            old_cfg = self.config.apps[name]
+            new_cfg = new_config.apps[name]
+            if (
+                old_cfg.cmd != new_cfg.cmd
+                or old_cfg.cwd != new_cfg.cwd
+                or old_cfg.schedule != new_cfg.schedule
+                or old_cfg.slot != new_cfg.slot
+                or old_cfg.pause_between != new_cfg.pause_between
+                or old_cfg.max_ram_mb != new_cfg.max_ram_mb
+                or old_cfg.timeout != new_cfg.timeout
+            ):
+                changed.append(name)
+
+        # Atualizar config de referência ANTES de re-aplicar os apps alterados
+        self.config = new_config
+
+        for name in changed:
+            was_enabled = self.state.apps[name].enabled
+            logger.info(f"[{name}] Config alterado — reaplicando (enabled={was_enabled})")
+            # Slot pode ter mudado — atualizar no state
+            self.state.apps[name].slot = new_config.apps[name].slot
+            if was_enabled:
+                # Reiniciar: desabilitar e reabilitar
+                self._disable_app(name)
+                self._enable_app(name)
+
+        save_state(self.state)
+        logger.info(
+            f"Config recarregado: +{len(added)} -{len(removed)} ~{len(changed)}"
+        )
 
     async def _monitor_loop(self) -> None:
         """Loop de monitoramento: atualiza métricas e processa comandos."""
@@ -331,6 +428,11 @@ class Orchestrator:
                     m = get_process_metrics(self.state.apps[name].pid)
                     self.state.apps[name].ram_mb = m.ram_mb
                     self.state.apps[name].cpu_pct = m.cpu_pct
+
+            # Hot reload do config.yaml
+            if self._check_config_changed():
+                logger.info("Mudança detectada em config.yaml — recarregando")
+                self._reload_config()
 
             # Processar comandos da UI
             commands = read_commands(self._commands_dir)
@@ -364,6 +466,9 @@ class Orchestrator:
             self._start_all()
         elif cmd.action == "stop_all":
             self._stop_all()
+        elif cmd.action == "reload":
+            logger.info("Reload manual do config.yaml solicitado")
+            self._reload_config()
 
     # ── Lifecycle ───────────────────────────────────────────────
 

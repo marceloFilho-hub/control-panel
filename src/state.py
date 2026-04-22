@@ -39,6 +39,9 @@ class ControlPlaneState:
     heavy_slots_max: int = 1
     light_slots_used: int = 0
     light_slots_max: int = 3
+    heavy_queue: list[str] = field(default_factory=list)  # FIFO de apps aguardando slot heavy
+    light_queue: list[str] = field(default_factory=list)  # FIFO de apps aguardando slot light
+    config_mtime: float = 0.0  # última modificação do config.yaml (para hot reload)
 
 
 STATE_FILE = Path(__file__).parent.parent / "state.json"
@@ -93,6 +96,9 @@ def load_state() -> ControlPlaneState:
         heavy_slots_max=raw.get("heavy_slots_max", 1),
         light_slots_used=raw.get("light_slots_used", 0),
         light_slots_max=raw.get("light_slots_max", 3),
+        heavy_queue=raw.get("heavy_queue", []),
+        light_queue=raw.get("light_queue", []),
+        config_mtime=raw.get("config_mtime", 0.0),
     )
 
 
@@ -118,7 +124,7 @@ def read_commands(commands_dir: Path | None = None) -> list[Command]:
     for f in d.glob("*.trigger"):
         stem = f.stem
         # Parse: action_appname ou action (global)
-        if stem in ("start_all", "stop_all"):
+        if stem in ("start_all", "stop_all", "reload"):
             commands.append(Command(action=stem))
         elif "_" in stem:
             action, app_name = stem.split("_", 1)
