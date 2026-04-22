@@ -22,6 +22,7 @@ class ExecutableInfo:
     path: Path
     cwd: Path  # pasta pai do executável
     venv_python: Path | None = None  # .venv\Scripts\python.exe se existir
+    lnk_args: str = ""  # argumentos extraídos do .lnk (se veio de um atalho)
 
     @property
     def display_kind(self) -> str:
@@ -49,15 +50,32 @@ class ExecutableInfo:
 def detect(path_str: str) -> ExecutableInfo:
     """Detecta o tipo de arquivo executável e retorna informações."""
     path = Path(path_str)
+    lnk_args = ""
+    lnk_cwd: Path | None = None
 
     # Resolver .lnk (atalhos do Windows)
     if path.suffix.lower() == ".lnk":
         resolved = _resolve_lnk(path)
         if resolved:
-            path = resolved
+            target, args, working_dir = resolved
+            path = target
+            lnk_args = args
+            if working_dir:
+                lnk_cwd = Path(working_dir)
+
+            # Se o target for wscript.exe/cscript.exe e há args apontando para
+            # um .vbs, o script real é o que nos interessa — usa o script do arg
+            target_name = path.name.lower()
+            if target_name in ("wscript.exe", "cscript.exe") and args:
+                # Extrair o primeiro caminho dos args (entre aspas ou não)
+                script_path = _extract_first_path(args)
+                if script_path and script_path.suffix.lower() == ".vbs":
+                    path = script_path
+                    # Demais args (após o script) mantém como lnk_args
+                    lnk_args = _strip_first_path(args)
 
     ext = path.suffix.lower()
-    cwd = path.parent if path.exists() else path.parent
+    cwd = lnk_cwd if lnk_cwd and lnk_cwd.exists() else path.parent
 
     kind = {
         ".py": "python",
@@ -85,7 +103,9 @@ def detect(path_str: str) -> ExecutableInfo:
                 break
             check_cwd = check_cwd.parent
 
-    return ExecutableInfo(kind=kind, path=path, cwd=cwd, venv_python=venv_python)
+    return ExecutableInfo(
+        kind=kind, path=path, cwd=cwd, venv_python=venv_python, lnk_args=lnk_args
+    )
 
 
 def build_command(path_str: str, arguments: str = "") -> tuple[str, str]:
@@ -95,7 +115,9 @@ def build_command(path_str: str, arguments: str = "") -> tuple[str, str]:
     cwd_string é o que vai em `cwd:` no YAML.
     """
     info = detect(path_str)
-    args = arguments.strip()
+    # Combinar args do .lnk com args passados explicitamente
+    combined = " ".join(p for p in (info.lnk_args.strip(), arguments.strip()) if p)
+    args = combined
 
     if info.kind == "python":
         # Se achou venv, usa caminho relativo ao cwd
@@ -188,25 +210,95 @@ def parse_command(cmd: str, cwd: str) -> tuple[str, str, str]:
     return first, " ".join(parts[1:]), "unknown"
 
 
-def _resolve_lnk(lnk_path: Path) -> Path | None:
-    """Resolve o target de um atalho .lnk do Windows."""
+def _resolve_lnk(lnk_path: Path) -> tuple[Path, str, str] | None:
+    """Resolve um atalho .lnk. Retorna (target, arguments, working_directory).
+
+    Usa COM via pywin32 quando disponível. Caso contrário, cai para um
+    parser binário simples (apenas o target).
+    """
+    # 1) pywin32 (COM)
     try:
-        import struct
-        with open(lnk_path, "rb") as f:
-            content = f.read()
-        # Parse simplificado: procura pela seção LinkInfo
-        # Fallback: usa COM via pywin32 se disponível
-        try:
-            import win32com.client  # type: ignore
-            shell = win32com.client.Dispatch("WScript.Shell")
-            shortcut = shell.CreateShortCut(str(lnk_path))
-            target = shortcut.Targetpath
-            if target:
-                return Path(target)
-        except ImportError:
-            pass
-        # Parse binário básico — extrai primeiro caminho encontrado
-        _ = struct
-        return None
+        import win32com.client  # type: ignore
+        shell = win32com.client.Dispatch("WScript.Shell")
+        shortcut = shell.CreateShortCut(str(lnk_path))
+        target = shortcut.Targetpath or ""
+        args = shortcut.Arguments or ""
+        wd = shortcut.WorkingDirectory or ""
+        if target:
+            return Path(target), args, wd
+    except ImportError:
+        pass
     except Exception:
-        return None
+        pass
+
+    # 2) Parser binário básico (estilo pylnk) — só extrai target se puder
+    try:
+        raw = lnk_path.read_bytes()
+        # Busca heurística: caminhos de arquivo ASCII terminados por \0
+        # dentro do bloco LinkTargetIDList
+        candidates = []
+        i = 0
+        while i < len(raw) - 3:
+            # Padrão: letra + ':' + '\\'
+            if 65 <= raw[i] <= 122 and raw[i + 1] == 0x3A and raw[i + 2] == 0x5C:
+                end = raw.find(b"\x00", i)
+                if end > i:
+                    try:
+                        s = raw[i:end].decode("latin-1", errors="replace")
+                        if "." in s and " " not in s[:3]:
+                            candidates.append(s)
+                    except Exception:
+                        pass
+                    i = end + 1
+                    continue
+            i += 1
+        if candidates:
+            return Path(candidates[0]), "", ""
+    except Exception:
+        pass
+    return None
+
+
+def _tokenize_args(args: str) -> list[str]:
+    """Tokeniza argumentos respeitando aspas."""
+    import shlex as _shlex
+    try:
+        return _shlex.split(args, posix=False)
+    except ValueError:
+        return args.split()
+
+
+def _extract_first_path(args: str) -> Path | None:
+    """Extrai o primeiro caminho real (ignorando flags como //nologo, /s)."""
+    for token in _tokenize_args(args):
+        t = token.strip('"')
+        if not t:
+            continue
+        # Pular flags: começam com / ou //
+        if t.startswith("/") and not (len(t) >= 2 and t[1] == ":"):
+            # Mas permitir paths absolutos Unix-style /c/... (não comum no win)
+            if not t.startswith("//") or (len(t) > 2 and t[2] != "/"):
+                # É uma flag como /s, //nologo, //B
+                continue
+        return Path(t)
+    return None
+
+
+def _strip_first_path(args: str) -> str:
+    """Remove o primeiro caminho real da string de argumentos (mantém as flags)."""
+    tokens = _tokenize_args(args)
+    result = []
+    found_path = False
+    for token in tokens:
+        t = token.strip('"')
+        if not found_path:
+            # Flag — mantém
+            if t.startswith("/") and not (len(t) >= 2 and t[1] == ":"):
+                result.append(token)
+                continue
+            # É o primeiro caminho — pula
+            found_path = True
+            continue
+        # Após o path, mantém tudo
+        result.append(token)
+    return " ".join(result).strip()

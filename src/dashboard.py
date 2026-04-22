@@ -9,15 +9,8 @@ from pathlib import Path
 import streamlit as st
 
 from app_discovery import APPS_DIR, scan_apps_dir
-from config_writer import (
-    build_schedule_string,
-    delete_app,
-    parse_schedule_string,
-    read_config_raw,
-    save_config,
-    upsert_app,
-)
-from executable_detector import build_command, detect, parse_command
+from config_writer import read_config_raw, upsert_app
+from executable_detector import build_command
 from execution_logger import (
     get_latest_log_path,
     list_apps_with_logs,
@@ -320,34 +313,15 @@ def render_config_tab(state: ControlPlaneState) -> None:
     if not discovered:
         st.warning(
             f"Nenhum arquivo executável na pasta.\n\n"
-            f"Cole `.vbs` / `.exe` / `.bat` / `.ps1` / `.py` em:\n"
+            f"Cole `.vbs` / `.exe` / `.bat` / `.ps1` / `.py` / `.lnk` em:\n"
             f"`{APPS_DIR}`"
         )
-    else:
-        st.markdown(f"**{len(discovered)} arquivo(s) encontrado(s):**")
-        for app in discovered:
-            existing = apps.get(app.name, {})
-            _render_pasta_row(app, existing, state)
+        return
 
-    # Apps legados (cwd absoluto, não vindos da pasta)
-    legacy_apps = {
-        name: data
-        for name, data in apps.items()
-        if data.get("_source") != "pasta"
-        and APPS_DIR.name not in str(data.get("cwd", "")).replace("\\", "/")
-    }
-    if legacy_apps:
-        st.divider()
-        with st.expander(
-            f"⚙️ Apps legados (cadastrados manualmente em config.yaml) — {len(legacy_apps)}",
-            expanded=False,
-        ):
-            st.caption(
-                "Estes apps foram cadastrados antes do sistema de pasta. "
-                "Eles continuam funcionando, mas não aparecem na listagem principal."
-            )
-            for name, data in legacy_apps.items():
-                _render_legacy_form(name, data)
+    st.markdown(f"**{len(discovered)} arquivo(s) encontrado(s):**")
+    for app in discovered:
+        existing = apps.get(app.name, {})
+        _render_pasta_row(app, existing, state)
 
 
 def _render_pasta_row(app, existing: dict, state: ControlPlaneState) -> None:
@@ -509,227 +483,8 @@ def _render_pasta_row(app, existing: dict, state: ControlPlaneState) -> None:
         st.divider()
 
 
-def _render_legacy_form(app_name: str, existing: dict) -> None:
-    """Formulário reduzido para apps já cadastrados fora da pasta."""
-    with st.expander(f"\U0001f4e6 {app_name}"):
-        _render_app_form(app_name=app_name, existing=existing)
 
 
-def _render_app_form(app_name: str | None, existing: dict | None) -> None:
-    """Renderiza formulário de criar/editar app."""
-    is_edit = app_name is not None
-    existing = existing or {}
-    form_key = f"form_{app_name or 'new'}"
-
-    # Extrair path/args existente do comando salvo (para edição)
-    existing_exe = ""
-    existing_args = ""
-    if is_edit and existing.get("cmd"):
-        existing_exe, existing_args, _ = parse_command(
-            existing.get("cmd", ""), existing.get("cwd", "")
-        )
-        if existing_exe and not Path(existing_exe).is_absolute():
-            existing_exe = str(Path(existing.get("cwd", "")) / existing_exe).replace("\\", "/")
-
-    with st.form(form_key, clear_on_submit=not is_edit):
-        cols = st.columns(2)
-        with cols[0]:
-            name_input = st.text_input(
-                "Nome da automação *",
-                value=app_name or "",
-                disabled=is_edit,
-                placeholder="ex: dp_admissao",
-                help="Identificador único (sem espaços). Não pode ser alterado depois.",
-            )
-        with cols[1]:
-            slot_input = st.selectbox(
-                "Slot *",
-                options=["heavy", "light", "always"],
-                index=["heavy", "light", "always"].index(existing.get("slot", "light")),
-                help="heavy = 1 por vez | light = até 3 paralelos | always = permanente",
-            )
-
-        st.markdown("**\U0001f4c2 Arquivo a executar**")
-        exe_input = st.text_input(
-            "Caminho do executável *",
-            value=existing_exe,
-            placeholder="C:/Users/Rotinas/Desktop/meu_robo.exe  |  .bat  |  .ps1  |  .py",
-            help=(
-                "Cole o caminho completo do arquivo. Suporta: .exe, .bat, .cmd, .ps1, .py, .lnk. "
-                "O tipo é detectado pela extensão e o comando é montado automaticamente."
-            ),
-            key=f"exe_{form_key}",
-        )
-        args_input = st.text_input(
-            "Argumentos (opcional)",
-            value=existing_args,
-            placeholder="ex: --once --verbose",
-            key=f"args_{form_key}",
-        )
-
-        # Preview do comando gerado
-        if exe_input.strip():
-            try:
-                info = detect(exe_input.strip())
-                preview_cmd, preview_cwd = build_command(exe_input.strip(), args_input.strip())
-                st.caption(
-                    f"Tipo detectado: **{info.display_kind}** "
-                    + ("(com .venv) " if info.venv_python else "")
-                    + f"| cwd: `{preview_cwd}`"
-                )
-                st.code(preview_cmd, language="bash")
-            except Exception as e:
-                st.caption(f"⚠️ Não foi possível analisar: {e}")
-
-        st.markdown("**\U0001f4c5 Frequência de execução**")
-        st.caption(
-            "O orquestrador NÃO cuida de horário — ele cuida do **tempo entre rodagens**. "
-            "Se a RAM estiver apertada na hora de rodar, o app aguarda automaticamente."
-        )
-        schedule_current = existing.get("schedule", "manual")
-        schedule_type, legacy_params = parse_schedule_string(schedule_current)
-
-        schedule_options = list(SCHEDULE_LABELS.keys())
-        idx = schedule_options.index(schedule_type) if schedule_type in schedule_options else 0
-
-        pause_between = 0
-
-        if slot_input == "always":
-            st.info(
-                "Serviços **always** ficam rodando permanentemente enquanto ativados "
-                "(auto-restart em crash se habilitado)."
-            )
-            schedule_value = "manual"
-        else:
-            schedule_choice = st.selectbox(
-                "Modo de execução",
-                options=schedule_options,
-                format_func=lambda x: SCHEDULE_LABELS[x],
-                index=idx,
-                key=f"sched_{form_key}",
-            )
-            schedule_value = build_schedule_string(schedule_choice)
-
-            if schedule_choice == "loop":
-                # Tempo entre rodagens — unidade escolhida pelo dev
-                unit_options = ["segundos", "minutos", "horas"]
-                default_secs = legacy_params.get(
-                    "pause_between", existing.get("pause_between", 300)
-                )
-                if default_secs >= 3600 and default_secs % 3600 == 0:
-                    default_unit, default_val = "horas", default_secs // 3600
-                elif default_secs >= 60 and default_secs % 60 == 0:
-                    default_unit, default_val = "minutos", default_secs // 60
-                else:
-                    default_unit, default_val = "segundos", default_secs
-
-                pcol1, pcol2 = st.columns([2, 1])
-                with pcol1:
-                    val = st.number_input(
-                        "Tempo entre rodagens",
-                        min_value=1,
-                        max_value=86400,
-                        value=int(default_val),
-                        help=(
-                            "Tempo de espera APÓS o fim de cada execução "
-                            "(o app roda → termina → dorme → roda de novo)."
-                        ),
-                        key=f"pbv_{form_key}",
-                    )
-                with pcol2:
-                    unit = st.selectbox(
-                        "Unidade",
-                        unit_options,
-                        index=unit_options.index(default_unit),
-                        key=f"pbu_{form_key}",
-                    )
-                multiplier = {"segundos": 1, "minutos": 60, "horas": 3600}[unit]
-                pause_between = int(val) * multiplier
-                st.caption(
-                    f"→ Vai aguardar **{pause_between} segundos** entre o fim "
-                    f"de uma execução e o início da próxima."
-                )
-
-        st.markdown("**⚡ Limites de recursos**")
-        r1, r2 = st.columns(2)
-        with r1:
-            max_ram = st.number_input(
-                "RAM máxima (MB)", min_value=64, max_value=16384,
-                value=existing.get("max_ram_mb", 1024),
-                key=f"ram_{form_key}",
-            )
-        with r2:
-            timeout = st.number_input(
-                "Timeout (segundos)", min_value=30, max_value=86400,
-                value=existing.get("timeout", 600),
-                help="0 = sem limite; após esse tempo o processo é morto",
-                key=f"to_{form_key}",
-            )
-
-        st.markdown("**\U0001f527 Opções**")
-        o1, o2 = st.columns(2)
-        with o1:
-            auto_start = st.checkbox(
-                "Auto-start (iniciar junto com o orquestrador)",
-                value=existing.get("auto_start", False),
-                key=f"auto_{form_key}",
-            )
-        with o2:
-            restart = st.checkbox(
-                "Restart em crash (apenas slot always)",
-                value=existing.get("restart_on_crash", False),
-                disabled=slot_input != "always",
-                key=f"rst_{form_key}",
-            )
-
-        # Botões
-        btn_cols = st.columns([1, 1, 4])
-        with btn_cols[0]:
-            submit = st.form_submit_button(
-                "\U0001f4be Salvar" if is_edit else "➕ Adicionar",
-                type="primary",
-                use_container_width=True,
-            )
-        with btn_cols[1]:
-            delete = st.form_submit_button(
-                "\U0001f5d1️ Remover",
-                type="secondary",
-                use_container_width=True,
-                disabled=not is_edit,
-            )
-
-        if submit:
-            if not name_input or not exe_input.strip():
-                st.error("Campos obrigatórios: nome e caminho do executável")
-            else:
-                generated_cmd, generated_cwd = build_command(
-                    exe_input.strip(), args_input.strip()
-                )
-                app_data = {
-                    "slot": slot_input,
-                    "cwd": generated_cwd,
-                    "cmd": generated_cmd,
-                    "schedule": schedule_value,
-                    "max_ram_mb": int(max_ram),
-                    "timeout": int(timeout),
-                }
-                if pause_between > 0:
-                    app_data["pause_between"] = int(pause_between)
-                if auto_start:
-                    app_data["auto_start"] = True
-                if restart and slot_input == "always":
-                    app_data["restart_on_crash"] = True
-
-                upsert_app(CONFIG_PATH, name_input, app_data)
-                st.success(f"✅ '{name_input}' salvo. Hot reload em até 5s.")
-                time.sleep(1)
-                st.rerun()
-
-        if delete and is_edit:
-            delete_app(CONFIG_PATH, app_name)
-            st.success(f"✅ '{app_name}' removido. Hot reload em até 5s.")
-            time.sleep(1)
-            st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════════
