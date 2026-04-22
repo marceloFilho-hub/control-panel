@@ -13,8 +13,9 @@ from loguru import logger
 from .alerter import TelegramAlerter
 from .config_loader import AppConfig
 from .execution_logger import ExecutionLogger
-from .resource_monitor import get_process_metrics, kill_process_tree
+from .resource_monitor import get_process_metrics, get_system_metrics, kill_process_tree
 from .state import AppState
+from .windows_job import JobObject
 
 
 class ProcessManager:
@@ -27,6 +28,8 @@ class ProcessManager:
         self._process: asyncio.subprocess.Process | None = None
         self._exec_logger: ExecutionLogger | None = None
         self._peak_ram_mb: float = 0.0
+        self._job: JobObject | None = None
+        self._cleanup_done: bool = False
 
     async def start(self) -> int | None:
         """Inicia o processo e retorna o PID."""
@@ -75,6 +78,17 @@ class ProcessManager:
         self.state.started_at = time.time()
         self.state.last_error = ""
         self._exec_logger.record.pid = self._process.pid
+        self._cleanup_done = False
+
+        # Associar ao Windows Job Object ASAP para capturar futuros filhos.
+        # Isso garante que netos/bisnetos spawnados pelo processo também
+        # morrerão quando o job for fechado (cleanup garantido).
+        self._job = JobObject(name=self.cfg.name)
+        if self._job.available:
+            if self._job.assign(self._process.pid):
+                logger.debug(f"[{self.cfg.name}] PID {self._process.pid} associado ao Job Object")
+            else:
+                logger.warning(f"[{self.cfg.name}] Falha ao associar ao Job Object — kill_tree será usado como fallback")
 
         # Stream stdout/stderr para o arquivo de log em tempo real
         asyncio.create_task(self._stream_output(self._process.stdout, b"[out] "))
@@ -95,6 +109,54 @@ class ProcessManager:
                 self._exec_logger.write(prefix + line)
         except Exception:
             pass
+
+    def _finalize(self) -> None:
+        """Garante que TODA a árvore do processo morreu e libera a memória.
+
+        Chamado em todos os paths de término (sucesso, falha, timeout, ram
+        excedida, kill manual). Idempotente — chamar duas vezes é seguro.
+
+        Sequência:
+          1) Terminar Job Object (mata árvore atômica no Windows)
+          2) Failsafe via psutil.kill_process_tree caso o job tenha falhado
+          3) gc.collect() para liberar memória do próprio orchestrator
+          4) Log do resultado
+        """
+        if self._cleanup_done:
+            return
+        self._cleanup_done = True
+
+        ram_before = get_system_metrics()["available_ram_mb"]
+        killed_count = 0
+
+        # 1) Job Object — mata árvore inteira atomicamente
+        if self._job and self._job.available:
+            killed_count = self._job.terminate()
+            self._job.close()
+            self._job = None
+
+        # 2) Failsafe — kill_tree via psutil caso sobre alguém
+        if self.state.pid:
+            metrics = get_process_metrics(self.state.pid)
+            if metrics.alive:
+                logger.warning(
+                    f"[{self.cfg.name}] PID {self.state.pid} ainda vivo após job — kill_tree"
+                )
+                kill_process_tree(self.state.pid)
+                killed_count += 1
+
+        # 3) Forçar GC do orchestrator (libera memória Python residual)
+        import gc
+        gc.collect()
+
+        # 4) Log
+        ram_after = get_system_metrics()["available_ram_mb"]
+        freed = ram_after - ram_before
+        if killed_count > 0 or freed > 10:
+            logger.info(
+                f"[{self.cfg.name}] Cleanup: {killed_count} proc(s) extintos, "
+                f"~{freed:.0f} MB liberados (RAM livre: {ram_after / 1024:.2f} GB)"
+            )
 
     async def wait_with_monitoring(self) -> int:
         """Aguarda o processo terminar, monitorando RAM e timeout."""
@@ -124,7 +186,6 @@ class ProcessManager:
                     logger.warning(
                         f"[{self.cfg.name}] TIMEOUT após {elapsed:.0f}s (limite: {timeout}s)"
                     )
-                    kill_process_tree(pid)
                     self.state.status = "timeout"
                     self.state.last_error = f"Timeout após {elapsed:.0f}s"
                     if self._exec_logger:
@@ -134,6 +195,7 @@ class ProcessManager:
                             error=f"Timeout após {elapsed:.0f}s",
                             peak_ram_mb=self._peak_ram_mb,
                         )
+                    self._finalize()
                     await self.alerter.alert_timeout(self.cfg.name, timeout)
                     return -1
 
@@ -151,7 +213,6 @@ class ProcessManager:
                     logger.warning(
                         f"[{self.cfg.name}] RAM excedida: {metrics.ram_mb:.0f}MB > {max_ram}MB"
                     )
-                    kill_process_tree(pid)
                     self.state.status = "failed"
                     self.state.last_error = f"RAM excedida: {metrics.ram_mb:.0f}MB"
                     if self._exec_logger:
@@ -161,6 +222,7 @@ class ProcessManager:
                             error=f"RAM excedida: {metrics.ram_mb:.0f}MB",
                             peak_ram_mb=self._peak_ram_mb,
                         )
+                    self._finalize()
                     await self.alerter.alert_ram(
                         self.cfg.name, metrics.ram_mb, max_ram
                     )
@@ -218,6 +280,10 @@ class ProcessManager:
                 self.cfg.name, exit_code, err_snippet
             )
 
+        # SEMPRE finalizar — mesmo em sucesso o processo pode ter deixado
+        # descendentes órfãos (browsers Selenium, subprocess detached, etc.)
+        self._finalize()
+
         return exit_code
 
     def is_alive(self) -> bool:
@@ -228,13 +294,7 @@ class ProcessManager:
         return metrics.alive
 
     def kill(self) -> None:
-        """Mata o processo."""
-        if self.state.pid:
-            kill_process_tree(self.state.pid)
-            self.state.status = "off"
-            self.state.pid = None
-            self.state.ram_mb = 0
-            self.state.cpu_pct = 0
+        """Mata o processo e TODA a árvore de descendentes via Job Object."""
         if self._exec_logger:
             self._exec_logger.close(
                 status="killed",
@@ -243,3 +303,9 @@ class ProcessManager:
                 peak_ram_mb=self._peak_ram_mb,
             )
             self._exec_logger = None
+        # _finalize() lida com Job Object + failsafe psutil + gc
+        self._finalize()
+        self.state.status = "off"
+        self.state.pid = None
+        self.state.ram_mb = 0
+        self.state.cpu_pct = 0
