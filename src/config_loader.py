@@ -45,6 +45,7 @@ class ControlPlaneConfig:
     log_retention: int = 30
     heavy_slots: int = 1
     light_slots: int = 3
+    ram_safety_margin_mb: int = 512  # RAM reservada para o SO antes de liberar apps
 
 
 ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
@@ -119,4 +120,5 @@ def load_config(config_path: str | Path = "config.yaml") -> ControlPlaneConfig:
         log_retention=settings.get("log_retention", 30),
         heavy_slots=settings.get("heavy_slots", 1),
         light_slots=settings.get("light_slots", 3),
+        ram_safety_margin_mb=settings.get("ram_safety_margin_mb", 512),
     )

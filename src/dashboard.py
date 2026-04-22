@@ -63,12 +63,8 @@ STATUS_ICONS = {
 }
 
 SCHEDULE_LABELS = {
-    "manual": "Manual (só via botão)",
-    "loop": "Loop contínuo com pausa",
-    "cron_daily": "Diário em horário fixo",
-    "interval_minutes": "A cada N minutos",
-    "interval_seconds": "A cada N segundos",
-    "interval_hours": "A cada N horas",
+    "manual": "Manual (roda uma vez ao ativar)",
+    "loop": "Repetir com tempo entre rodagens",
 }
 
 
@@ -102,10 +98,10 @@ def render_kpi_row(state: ControlPlaneState) -> None:
     total = len(state.apps)
     running = sum(1 for a in state.apps.values() if a.status == "running")
     failed = sum(1 for a in state.apps.values() if a.status == "failed")
-    paused = sum(1 for a in state.apps.values() if a.status == "paused")
     enabled = sum(1 for a in state.apps.values() if a.enabled)
+    waiting_mem = len(state.memory_queue)
 
-    cols = st.columns(7)
+    cols = st.columns(8)
     with cols[0]:
         st.metric("Apps", total)
     with cols[1]:
@@ -113,12 +109,14 @@ def render_kpi_row(state: ControlPlaneState) -> None:
     with cols[2]:
         st.metric("Rodando", running)
     with cols[3]:
-        st.metric("Pausadas", paused)
+        st.metric("Fila RAM", waiting_mem)
     with cols[4]:
         st.metric("Falhas", failed)
     with cols[5]:
-        st.metric("RAM VM", f"{state.total_ram_mb / 1024:.1f} GB")
+        st.metric("RAM usada", f"{state.total_ram_mb / 1024:.1f} GB")
     with cols[6]:
+        st.metric("RAM livre", f"{state.available_ram_mb / 1024:.1f} GB")
+    with cols[7]:
         st.metric("CPU VM", f"{state.total_cpu_pct:.0f}%")
 
 
@@ -234,10 +232,19 @@ def _render_app_controls(name: str, app: AppState) -> None:
 # ═══════════════════════════════════════════════════════════════
 
 def render_queue_view(state: ControlPlaneState) -> None:
-    st.markdown("### \U0001f4cb Fila de execução (FIFO)")
+    st.markdown("### \U0001f4cb Filas de execução")
 
+    # Banner de RAM disponível
+    available_gb = state.available_ram_mb / 1024
+    safety_mb = state.ram_safety_margin_mb
+    usable_mb = max(0.0, state.available_ram_mb - safety_mb)
+    st.markdown(
+        f"**RAM disponível:** {available_gb:.2f} GB "
+        f"(**{usable_mb:.0f} MB utilizáveis** após margem de {safety_mb} MB para o SO)"
+    )
+
+    # Filas de slot
     col1, col2 = st.columns(2)
-
     with col1:
         st.markdown(f"**Slot Heavy** ({state.heavy_slots_used}/{state.heavy_slots_max} em uso)")
         if not state.heavy_queue:
@@ -245,7 +252,6 @@ def render_queue_view(state: ControlPlaneState) -> None:
         else:
             for pos, app_name in enumerate(state.heavy_queue, 1):
                 st.markdown(f"`{pos}.` **{app_name}** ⏳ aguardando slot")
-
     with col2:
         st.markdown(f"**Slot Light** ({state.light_slots_used}/{state.light_slots_max} em uso)")
         if not state.light_queue:
@@ -253,6 +259,25 @@ def render_queue_view(state: ControlPlaneState) -> None:
         else:
             for pos, app_name in enumerate(state.light_queue, 1):
                 st.markdown(f"`{pos}.` **{app_name}** ⏳ aguardando slot")
+
+    # Fila de memória
+    st.divider()
+    st.markdown("### \U0001f9e0 Fila de memória")
+    st.caption(
+        "Apps que já conquistaram o slot mas estão aguardando RAM suficiente "
+        "para iniciar com segurança."
+    )
+    if not state.memory_queue:
+        st.info("Nenhum app aguardando memória")
+    else:
+        for pos, app_name in enumerate(state.memory_queue, 1):
+            app = state.apps.get(app_name)
+            next_info = f" — {app.next_run}" if app and app.next_run else ""
+            st.markdown(
+                f"<span style='color:{WARNING}'>⏳</span> "
+                f"`{pos}.` **{app_name}**{next_info}",
+                unsafe_allow_html=True,
+            )
 
     st.divider()
     st.markdown("### \U0001f3ac Apps rodando agora")
@@ -365,76 +390,74 @@ def _render_app_form(app_name: str | None, existing: dict | None) -> None:
             except Exception as e:
                 st.caption(f"⚠️ Não foi possível analisar: {e}")
 
-        st.markdown("**\U0001f4c5 Agendamento**")
+        st.markdown("**\U0001f4c5 Frequência de execução**")
+        st.caption(
+            "O orquestrador NÃO cuida de horário — ele cuida do **tempo entre rodagens**. "
+            "Se a RAM estiver apertada na hora de rodar, o app aguarda automaticamente."
+        )
         schedule_current = existing.get("schedule", "manual")
-        schedule_type, schedule_params = parse_schedule_string(schedule_current)
+        schedule_type, legacy_params = parse_schedule_string(schedule_current)
 
         schedule_options = list(SCHEDULE_LABELS.keys())
         idx = schedule_options.index(schedule_type) if schedule_type in schedule_options else 0
 
-        # Always só faz sentido com "manual" (é iniciado e fica rodando)
+        pause_between = 0
+
         if slot_input == "always":
-            st.info("Apps 'always' não usam schedule — ficam rodando enquanto ativadas.")
+            st.info(
+                "Serviços **always** ficam rodando permanentemente enquanto ativados "
+                "(auto-restart em crash se habilitado)."
+            )
             schedule_value = "manual"
         else:
             schedule_choice = st.selectbox(
-                "Tipo de agendamento",
+                "Modo de execução",
                 options=schedule_options,
                 format_func=lambda x: SCHEDULE_LABELS[x],
                 index=idx,
                 key=f"sched_{form_key}",
             )
+            schedule_value = build_schedule_string(schedule_choice)
 
-            schedule_kwargs: dict = {}
-            if schedule_choice == "cron_daily":
-                c1, c2 = st.columns(2)
-                with c1:
-                    hour = st.number_input(
-                        "Hora", min_value=0, max_value=23,
-                        value=schedule_params.get("hour", 7),
-                        key=f"hour_{form_key}",
+            if schedule_choice == "loop":
+                # Tempo entre rodagens — unidade escolhida pelo dev
+                unit_options = ["segundos", "minutos", "horas"]
+                default_secs = legacy_params.get(
+                    "pause_between", existing.get("pause_between", 300)
+                )
+                if default_secs >= 3600 and default_secs % 3600 == 0:
+                    default_unit, default_val = "horas", default_secs // 3600
+                elif default_secs >= 60 and default_secs % 60 == 0:
+                    default_unit, default_val = "minutos", default_secs // 60
+                else:
+                    default_unit, default_val = "segundos", default_secs
+
+                pcol1, pcol2 = st.columns([2, 1])
+                with pcol1:
+                    val = st.number_input(
+                        "Tempo entre rodagens",
+                        min_value=1,
+                        max_value=86400,
+                        value=int(default_val),
+                        help=(
+                            "Tempo de espera APÓS o fim de cada execução "
+                            "(o app roda → termina → dorme → roda de novo)."
+                        ),
+                        key=f"pbv_{form_key}",
                     )
-                with c2:
-                    minute = st.number_input(
-                        "Minuto", min_value=0, max_value=59,
-                        value=schedule_params.get("minute", 0),
-                        key=f"min_{form_key}",
+                with pcol2:
+                    unit = st.selectbox(
+                        "Unidade",
+                        unit_options,
+                        index=unit_options.index(default_unit),
+                        key=f"pbu_{form_key}",
                     )
-                schedule_kwargs = {"hour": int(hour), "minute": int(minute)}
-            elif schedule_choice == "interval_minutes":
-                n = st.number_input(
-                    "A cada quantos minutos", min_value=1, max_value=1440,
-                    value=schedule_params.get("minutes", 15),
-                    key=f"intm_{form_key}",
+                multiplier = {"segundos": 1, "minutos": 60, "horas": 3600}[unit]
+                pause_between = int(val) * multiplier
+                st.caption(
+                    f"→ Vai aguardar **{pause_between} segundos** entre o fim "
+                    f"de uma execução e o início da próxima."
                 )
-                schedule_kwargs = {"minutes": int(n)}
-            elif schedule_choice == "interval_seconds":
-                n = st.number_input(
-                    "A cada quantos segundos", min_value=10, max_value=3600,
-                    value=schedule_params.get("seconds", 60),
-                    key=f"ints_{form_key}",
-                )
-                schedule_kwargs = {"seconds": int(n)}
-            elif schedule_choice == "interval_hours":
-                n = st.number_input(
-                    "A cada quantas horas", min_value=1, max_value=24,
-                    value=schedule_params.get("hours", 1),
-                    key=f"inth_{form_key}",
-                )
-                schedule_kwargs = {"hours": int(n)}
-
-            schedule_value = build_schedule_string(schedule_choice, **schedule_kwargs)
-
-        # Pause between (só para loop)
-        pause_between = 0
-        if schedule_value == "loop":
-            pause_between = st.number_input(
-                "Pausa entre ciclos (segundos)",
-                min_value=0, max_value=86400,
-                value=existing.get("pause_between", 600),
-                help="Tempo de espera após cada ciclo completo",
-                key=f"pause_{form_key}",
-            )
 
         st.markdown("**⚡ Limites de recursos**")
         r1, r2 = st.columns(2)

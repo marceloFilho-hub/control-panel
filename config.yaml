@@ -2,20 +2,22 @@
 # HIDRA CONTROL PLANE — Configuração de automações
 # ═══════════════════════════════════════════════════════════════
 #
+# ARQUIVO GERENCIADO PELA UI
+# Edite pelo dashboard em http://localhost:9000 → aba "Configurar".
+#
 # Slots:
 #   heavy  → Semaphore(1) — máximo 1 job pesado por vez
 #   light  → Semaphore(3) — até 3 jobs leves em paralelo
 #   always → Serviço permanente com auto-restart
 #
 # Schedules:
-#   "manual"                  → só roda via dashboard
-#   "loop"                    → roda continuamente com pause_between
-#   "cron(hour=7, minute=0)"  → cron-like (APScheduler)
-#   "interval(minutes=15)"    → a cada N minutos/segundos
+#   "manual"  → roda uma vez ao ativar (botão ▶)
+#   "loop"    → roda, aguarda pause_between segundos, repete
 #
-# auto_start:
-#   false (padrão) → app fica IDLE até ser ativado pela UI
-#   true           → app inicia automaticamente ao subir o orquestrador
+# O orquestrador NÃO cuida de horário (cron). Ele cuida de:
+#   - tempo entre rodagens (pause_between)
+#   - fila por slot (heavy=1, light=3)
+#   - fila por memória (aguarda RAM liberar antes de iniciar)
 # ═══════════════════════════════════════════════════════════════
 
 apps:
@@ -27,28 +29,27 @@ apps:
     cwd: "C:/Users/Rotinas/Documents/Projetos/DP_admissao"
     cmd: ".venv/Scripts/python src/autoBot/app.py"
     schedule: "loop"
-    pause_between: 600        # 10 min entre ciclos
+    pause_between: 600        # 10 min entre rodagens
     max_ram_mb: 1200
     timeout: 3600
-    priority: 1
 
   fiscal_xls:
     slot: heavy
     cwd: "C:/Users/Rotinas/Documents/Projetos/Hidra/fiscal_vs_balancete"
     cmd: ".venv/Scripts/python run_drive_xls.py"
-    schedule: "cron(hour=7, minute=0)"
+    schedule: "loop"
+    pause_between: 86400      # 1x por dia (24h após o fim)
     max_ram_mb: 1500
     timeout: 1800
-    priority: 2
 
   fiscal_pdf:
     slot: heavy
     cwd: "C:/Users/Rotinas/Documents/Projetos/Hidra/fiscal_vs_balancete"
     cmd: ".venv/Scripts/python run_drive_pdf.py"
-    schedule: "cron(hour=8, minute=0)"
+    schedule: "loop"
+    pause_between: 86400      # 1x por dia
     max_ram_mb: 1000
     timeout: 1200
-    priority: 3
 
   criar_ticket:
     slot: heavy
@@ -72,7 +73,8 @@ apps:
     slot: light
     cwd: "C:/Users/Rotinas/Documents/Projetos/Hidra/mensageiro"
     cmd: ".venv/Scripts/python src/main.py"
-    schedule: "interval(minutes=15)"
+    schedule: "loop"
+    pause_between: 900        # a cada 15 min após o fim
     max_ram_mb: 256
     timeout: 120
 
@@ -80,7 +82,8 @@ apps:
     slot: light
     cwd: "C:/Users/Rotinas/Documents/Projetos/cadastro_contribuinte"
     cmd: ".venv/Scripts/python src/logica/monitor_email.py --once"
-    schedule: "interval(seconds=60)"
+    schedule: "loop"
+    pause_between: 60         # verifica emails a cada 60s (efêmero com --once)
     max_ram_mb: 256
     timeout: 60
 
@@ -88,7 +91,8 @@ apps:
     slot: light
     cwd: "C:/Users/Rotinas/Documents/Projetos/Hidra/painel_bi"
     cmd: ".venv/Scripts/python src/main.py"
-    schedule: "interval(minutes=60)"
+    schedule: "loop"
+    pause_between: 3600       # a cada 1h após o fim
     max_ram_mb: 512
     timeout: 300
 
@@ -125,3 +129,4 @@ settings:
   log_retention: 30
   heavy_slots: 1
   light_slots: 3
+  ram_safety_margin_mb: 512   # RAM reservada ao SO — apps aguardam se available - margin < max_ram_mb

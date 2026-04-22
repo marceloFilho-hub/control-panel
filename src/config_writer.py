@@ -79,60 +79,43 @@ def delete_app(config_path: Path, app_name: str) -> bool:
     return False
 
 
-def build_schedule_string(schedule_type: str, **kwargs: Any) -> str:
+def build_schedule_string(schedule_type: str, **_kwargs: Any) -> str:
     """Constrói string de schedule a partir dos campos da UI.
 
-    schedule_type: "manual", "loop", "cron_daily", "interval_minutes",
-                   "interval_seconds", "interval_hours"
+    schedule_type: "manual" ou "loop".
+    Não suportamos mais cron/interval — tempo entre rodagens vira pause_between.
     """
-    if schedule_type == "manual":
-        return "manual"
     if schedule_type == "loop":
         return "loop"
-    if schedule_type == "cron_daily":
-        hour = kwargs.get("hour", 0)
-        minute = kwargs.get("minute", 0)
-        return f"cron(hour={hour}, minute={minute})"
-    if schedule_type == "interval_minutes":
-        n = kwargs.get("minutes", 15)
-        return f"interval(minutes={n})"
-    if schedule_type == "interval_seconds":
-        n = kwargs.get("seconds", 60)
-        return f"interval(seconds={n})"
-    if schedule_type == "interval_hours":
-        n = kwargs.get("hours", 1)
-        return f"interval(hours={n})"
     return "manual"
 
 
 def parse_schedule_string(schedule: str) -> tuple[str, dict[str, int]]:
-    """Inverso de build_schedule_string — para preencher form ao editar."""
+    """Extrai tipo do schedule para preencher o formulário ao editar.
+
+    Converte schedules legados (cron/interval) em "loop" com pause_between
+    já que agora só lidamos com manual ou loop-com-pausa.
+    """
     import re
 
-    if schedule == "manual":
-        return "manual", {}
     if schedule == "loop":
         return "loop", {}
+    if schedule == "manual":
+        return "manual", {}
 
-    cron_match = re.match(r"cron\((.+)\)", schedule)
-    if cron_match:
-        params = {}
-        for part in cron_match.group(1).split(","):
-            key, val = part.strip().split("=")
-            params[key.strip()] = int(val.strip())
-        return "cron_daily", params
-
+    # Legado: interval(...) vira "loop" com pause_between equivalente
     interval_match = re.match(r"interval\((.+)\)", schedule)
     if interval_match:
         params = {}
         for part in interval_match.group(1).split(","):
             key, val = part.strip().split("=")
             params[key.strip()] = int(val.strip())
-        if "minutes" in params:
-            return "interval_minutes", params
-        if "seconds" in params:
-            return "interval_seconds", params
-        if "hours" in params:
-            return "interval_hours", params
+        seconds = (
+            params.get("seconds", 0)
+            + params.get("minutes", 0) * 60
+            + params.get("hours", 0) * 3600
+        )
+        return "loop", {"pause_between": seconds}
 
+    # Legado: cron(...) — não há equivalente direto; vira manual
     return "manual", {}

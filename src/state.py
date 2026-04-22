@@ -41,6 +41,9 @@ class ControlPlaneState:
     light_slots_max: int = 3
     heavy_queue: list[str] = field(default_factory=list)  # FIFO de apps aguardando slot heavy
     light_queue: list[str] = field(default_factory=list)  # FIFO de apps aguardando slot light
+    memory_queue: list[str] = field(default_factory=list)  # apps com slot livre mas RAM insuficiente
+    available_ram_mb: float = 0.0
+    ram_safety_margin_mb: int = 512  # margem de segurança para o SO
     config_mtime: float = 0.0  # última modificação do config.yaml (para hot reload)
 
 
@@ -98,6 +101,9 @@ def load_state() -> ControlPlaneState:
         light_slots_max=raw.get("light_slots_max", 3),
         heavy_queue=raw.get("heavy_queue", []),
         light_queue=raw.get("light_queue", []),
+        memory_queue=raw.get("memory_queue", []),
+        available_ram_mb=raw.get("available_ram_mb", 0.0),
+        ram_safety_margin_mb=raw.get("ram_safety_margin_mb", 512),
         config_mtime=raw.get("config_mtime", 0.0),
     )
 

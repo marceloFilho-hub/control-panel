@@ -1,23 +1,31 @@
-"""Orquestrador central — scheduler + semáforos + ciclo de vida.
+"""Orquestrador central — gerencia ciclo de vida dos apps.
 
-Modo de operação: inicia IDLE. Apps só rodam quando ativados pela UI
-ou quando marcados com auto_start: true no config.yaml.
+Filosofia: o orquestrador NÃO cuida de horário (cron). Ele cuida de:
+
+  1. Tempo entre rodagens (pause_between)      — apps efêmeros
+  2. Fila por slot (heavy=1, light=3)           — controle de concorrência
+  3. Fila por memória disponível                — antes de iniciar um app,
+                                                  verifica se a RAM disponível
+                                                  comporta o max_ram_mb dele
+                                                  (menos a margem de segurança).
+                                                  Se não comportar, aguarda.
+
+Schedules válidos:
+  "manual"  → roda uma vez ao clicar em Start
+  "loop"    → roda uma vez, aguarda pause_between, repete (apps efêmeros)
+  (always usa cfg.slot == "always" com restart_on_crash)
 """
 
 from __future__ import annotations
 
 import asyncio
-import re
 import time
 from pathlib import Path
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
 
 from .alerter import TelegramAlerter
-from .config_loader import AppConfig, ControlPlaneConfig, load_config
+from .config_loader import ControlPlaneConfig, load_config
 from .process_manager import ProcessManager
 from .resource_monitor import get_system_metrics
 from .state import (
@@ -36,32 +44,39 @@ class Orchestrator:
             config.alerts.telegram_bot_token,
             config.alerts.telegram_chat_id,
         )
-        self.scheduler = AsyncIOScheduler(timezone="America/Sao_Paulo")
         self.heavy_sem = asyncio.Semaphore(config.heavy_slots)
         self.light_sem = asyncio.Semaphore(config.light_slots)
         self.state = ControlPlaneState(
             started_at=time.time(),
             heavy_slots_max=config.heavy_slots,
             light_slots_max=config.light_slots,
+            ram_safety_margin_mb=config.ram_safety_margin_mb,
         )
         self.managers: dict[str, ProcessManager] = {}
         self._running = True
         self._app_tasks: dict[str, asyncio.Task] = {}
         self._commands_dir = Path(__file__).parent.parent / "commands"
         self._commands_dir.mkdir(exist_ok=True)
-        # Filas FIFO rastreáveis (espelham a ordem dos Semaphores)
+        # Filas rastreáveis
         self._heavy_queue: list[str] = []
         self._light_queue: list[str] = []
+        self._memory_queue: list[str] = []
+        # Evento sinalizado quando RAM libera — desperta quem aguarda memória
+        self._memory_event = asyncio.Event()
         # Hot reload do config.yaml
         self._config_path = Path(__file__).parent.parent / "config.yaml"
-        self._last_config_mtime = self._config_path.stat().st_mtime if self._config_path.exists() else 0.0
+        self._last_config_mtime = (
+            self._config_path.stat().st_mtime if self._config_path.exists() else 0.0
+        )
+
+    # ── Semáforos e filas ───────────────────────────────────────
 
     def _get_semaphore(self, slot: str) -> asyncio.Semaphore | None:
         if slot == "heavy":
             return self.heavy_sem
         elif slot == "light":
             return self.light_sem
-        return None  # always — sem semáforo
+        return None
 
     def _get_queue(self, slot: str) -> list[str] | None:
         if slot == "heavy":
@@ -70,37 +85,63 @@ class Orchestrator:
             return self._light_queue
         return None
 
-    def _init_app_states(self) -> None:
-        for name, cfg in self.config.apps.items():
-            self.state.apps[name] = AppState(name=name, slot=cfg.slot)
+    # ── Memory-aware scheduling ─────────────────────────────────
 
-    def _parse_schedule(self, schedule: str) -> CronTrigger | IntervalTrigger | None:
-        """Converte string de schedule para trigger do APScheduler."""
-        cron_match = re.match(r"cron\((.+)\)", schedule)
-        if cron_match:
-            params = {}
-            for part in cron_match.group(1).split(","):
-                key, val = part.strip().split("=")
-                params[key.strip()] = val.strip()
-            return CronTrigger(**params)
+    def _get_available_ram_mb(self) -> float:
+        """RAM disponível no sistema (já descontada a margem de segurança)."""
+        metrics = get_system_metrics()
+        raw_available = metrics["available_ram_mb"]
+        self.state.available_ram_mb = raw_available
+        return max(0.0, raw_available - self.config.ram_safety_margin_mb)
 
-        interval_match = re.match(r"interval\((.+)\)", schedule)
-        if interval_match:
-            params = {}
-            for part in interval_match.group(1).split(","):
-                key, val = part.strip().split("=")
-                params[key.strip()] = int(val.strip())
-            return IntervalTrigger(**params)
+    async def _wait_for_memory(self, app_name: str, required_mb: int) -> None:
+        """Espera até que haja RAM suficiente para iniciar o app.
 
-        return None
+        Adiciona o app à memory_queue para visibilidade no dashboard.
+        Re-checa a cada 5s OU quando outro app liberar RAM (evento).
+        """
+        app_state = self.state.apps[app_name]
+
+        while self._running and app_state.enabled:
+            available = self._get_available_ram_mb()
+            if available >= required_mb:
+                return
+
+            if app_name not in self._memory_queue:
+                self._memory_queue.append(app_name)
+                app_state.next_run = (
+                    f"aguardando RAM ({available:.0f}/{required_mb} MB)"
+                )
+                logger.info(
+                    f"[{app_name}] RAM insuficiente: {available:.0f} MB disponível, "
+                    f"precisa de {required_mb} MB — entrou na fila de memória"
+                )
+                save_state(self.state)
+
+            # Aguarda sinal OU 5s
+            try:
+                await asyncio.wait_for(self._memory_event.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                pass
+            # Reset do evento (outros aguardadores também reavaliarão)
+            self._memory_event.clear()
+
+        # Sair da fila ao cancelar ou desativar
+        if app_name in self._memory_queue:
+            self._memory_queue.remove(app_name)
+
+    def _release_memory_event(self) -> None:
+        """Acorda quem está aguardando RAM liberar."""
+        self._memory_event.set()
 
     # ── Execução de jobs ────────────────────────────────────────
 
     async def _run_job(self, app_name: str) -> None:
-        """Executa um job batch com controle de semáforo."""
+        """Executa um job com controle de semáforo + check de memória."""
         cfg = self.config.apps[app_name]
         app_state = self.state.apps[app_name]
         sem = self._get_semaphore(cfg.slot)
+        queue = self._get_queue(cfg.slot)
 
         if not app_state.enabled:
             return
@@ -110,35 +151,44 @@ class Orchestrator:
             return
 
         app_state.status = "queued"
-        # Adicionar à fila FIFO rastreável
-        queue = self._get_queue(cfg.slot)
         if queue is not None and app_name not in queue:
             queue.append(app_name)
         save_state(self.state)
 
+        # 1) Aguardar slot (semáforo FIFO)
         if sem:
-            logger.debug(f"[{app_name}] Aguardando slot {cfg.slot}...")
             await sem.acquire()
-            # Remover da fila ao conseguir slot
             if queue is not None and app_name in queue:
                 queue.remove(app_name)
             self._update_slot_counts()
 
         try:
+            # 2) Aguardar RAM disponível
+            await self._wait_for_memory(app_name, cfg.max_ram_mb)
+
+            if not app_state.enabled or not self._running:
+                return
+
+            # 3) Iniciar processo
             manager = ProcessManager(cfg, app_state, self.alerter)
             self.managers[app_name] = manager
             pid = await manager.start()
             if pid:
+                # Remover da fila de memória se ainda estava
+                if app_name in self._memory_queue:
+                    self._memory_queue.remove(app_name)
                 save_state(self.state)
                 await manager.wait_with_monitoring()
         finally:
             if sem:
                 sem.release()
                 self._update_slot_counts()
+            # Liberou RAM — acordar quem aguarda
+            self._release_memory_event()
             save_state(self.state)
 
     async def _run_loop_job(self, app_name: str) -> None:
-        """Executa um job em loop contínuo com pausa entre ciclos."""
+        """Loop: roda job efêmero, aguarda pause_between, repete."""
         cfg = self.config.apps[app_name]
         app_state = self.state.apps[app_name]
         while self._running and app_state.enabled:
@@ -147,9 +197,8 @@ class Orchestrator:
                 break
             if cfg.pause_between > 0:
                 app_state.status = "off"
-                app_state.next_run = f"pausa {cfg.pause_between}s"
+                app_state.next_run = f"próxima em {cfg.pause_between}s"
                 save_state(self.state)
-                # Sleep interruptível para responder a stop/pause rápido
                 for _ in range(cfg.pause_between):
                     if not app_state.enabled or not self._running:
                         break
@@ -161,6 +210,11 @@ class Orchestrator:
         app_state = self.state.apps[app_name]
 
         while self._running and app_state.enabled:
+            # Check de memória antes de iniciar serviço always
+            await self._wait_for_memory(app_name, cfg.max_ram_mb)
+            if not app_state.enabled or not self._running:
+                return
+
             manager = ProcessManager(cfg, app_state, self.alerter)
             self.managers[app_name] = manager
             pid = await manager.start()
@@ -174,6 +228,7 @@ class Orchestrator:
 
             save_state(self.state)
             await manager.wait_with_monitoring()
+            self._release_memory_event()
 
             if not self._running or not app_state.enabled:
                 break
@@ -190,7 +245,7 @@ class Orchestrator:
     # ── Controle de apps (start/stop/pause/resume) ──────────────
 
     def _enable_app(self, app_name: str) -> None:
-        """Ativa um app — inicia task ou agenda no scheduler."""
+        """Ativa um app e inicia sua task de execução."""
         if app_name not in self.config.apps:
             logger.warning(f"[{app_name}] App não encontrado no config")
             return
@@ -209,38 +264,20 @@ class Orchestrator:
             task = asyncio.create_task(
                 self._run_always_service(app_name), name=f"always:{app_name}"
             )
-            self._app_tasks[app_name] = task
         elif cfg.schedule == "loop":
             task = asyncio.create_task(
                 self._run_loop_job(app_name), name=f"loop:{app_name}"
             )
-            self._app_tasks[app_name] = task
-        elif cfg.schedule == "manual":
-            # Manual: executa uma vez agora
+        else:
+            # manual — roda uma vez
             task = asyncio.create_task(
                 self._run_job(app_name), name=f"manual:{app_name}"
             )
-            self._app_tasks[app_name] = task
-        else:
-            # cron/interval: agenda no scheduler
-            trigger = self._parse_schedule(cfg.schedule)
-            if trigger:
-                self.scheduler.add_job(
-                    self._run_job,
-                    trigger=trigger,
-                    args=[app_name],
-                    id=app_name,
-                    name=app_name,
-                    max_instances=1,
-                    misfire_grace_time=60,
-                    replace_existing=True,
-                )
-                logger.info(f"[{app_name}] Agendado: {cfg.schedule}")
-
+        self._app_tasks[app_name] = task
         save_state(self.state)
 
     def _disable_app(self, app_name: str) -> None:
-        """Desativa um app — mata o processo e remove do scheduler."""
+        """Desativa um app — mata o processo e cancela a task."""
         if app_name not in self.state.apps:
             return
 
@@ -248,32 +285,30 @@ class Orchestrator:
         app_state.enabled = False
         logger.info(f"[{app_name}] Desativado pelo usuário")
 
-        # Matar processo se rodando
         if app_name in self.managers and self.managers[app_name].is_alive():
             self.managers[app_name].kill()
 
-        # Cancelar task async
         if app_name in self._app_tasks:
             task = self._app_tasks[app_name]
             if not task.done():
                 task.cancel()
             del self._app_tasks[app_name]
 
-        # Remover do scheduler
-        try:
-            self.scheduler.remove_job(app_name)
-        except Exception:
-            pass
+        # Limpar das filas
+        for q in (self._heavy_queue, self._light_queue, self._memory_queue):
+            if app_name in q:
+                q.remove(app_name)
 
         app_state.status = "off"
         app_state.pid = None
         app_state.ram_mb = 0
         app_state.cpu_pct = 0
         app_state.next_run = ""
+        self._release_memory_event()  # pode ter liberado slot pra outro
         save_state(self.state)
 
     def _pause_app(self, app_name: str) -> None:
-        """Pausa um app — não mata o processo rodando, mas impede novas execuções."""
+        """Pausa — não mata o processo rodando, mas impede novas execuções."""
         if app_name not in self.state.apps:
             return
 
@@ -281,52 +316,42 @@ class Orchestrator:
         app_state.enabled = False
         logger.info(f"[{app_name}] Pausado pelo usuário")
 
-        # Pausar no scheduler (não remove, só pausa)
-        try:
-            self.scheduler.pause_job(app_name)
-        except Exception:
-            pass
-
-        # Se não está rodando agora, marcar como paused
         if app_state.status != "running":
             app_state.status = "paused"
-            # Cancelar task de loop/always se não estiver no meio de execução
             if app_name in self._app_tasks:
                 task = self._app_tasks[app_name]
                 if not task.done():
                     task.cancel()
                 del self._app_tasks[app_name]
         else:
-            # Está rodando — marcar que ao terminar vai pausar
-            app_state.next_run = "pausado"
+            app_state.next_run = "pausado após término"
 
         save_state(self.state)
 
     def _resume_app(self, app_name: str) -> None:
-        """Retoma um app pausado."""
         if app_name not in self.state.apps:
             return
-
         app_state = self.state.apps[app_name]
         if app_state.status not in ("paused", "off", "done", "failed", "timeout"):
             return
-
         logger.info(f"[{app_name}] Retomado pelo usuário")
         self._enable_app(app_name)
 
     def _start_all(self) -> None:
-        """Ativa todos os apps."""
         logger.info("START ALL — ativando todos os apps")
         for name in self.config.apps:
             if not self.state.apps[name].enabled:
                 self._enable_app(name)
 
     def _stop_all(self) -> None:
-        """Desativa todos os apps."""
         logger.info("STOP ALL — desativando todos os apps")
         for name in list(self.state.apps.keys()):
             if self.state.apps[name].enabled or self.state.apps[name].status == "running":
                 self._disable_app(name)
+
+    def _init_app_states(self) -> None:
+        for name, cfg in self.config.apps.items():
+            self.state.apps[name] = AppState(name=name, slot=cfg.slot)
 
     # ── Monitoramento ───────────────────────────────────────────
 
@@ -337,11 +362,11 @@ class Orchestrator:
         self.state.light_slots_used = light_max - self.light_sem._value
         self.state.heavy_queue = list(self._heavy_queue)
         self.state.light_queue = list(self._light_queue)
+        self.state.memory_queue = list(self._memory_queue)
 
     # ── Hot reload do config.yaml ───────────────────────────────
 
     def _check_config_changed(self) -> bool:
-        """Retorna True se config.yaml foi modificado desde o último load."""
         if not self._config_path.exists():
             return False
         current_mtime = self._config_path.stat().st_mtime
@@ -352,7 +377,6 @@ class Orchestrator:
         return False
 
     def _reload_config(self) -> None:
-        """Recarrega config.yaml e aplica diff sem reiniciar processos."""
         try:
             new_config = load_config(self._config_path)
         except Exception as e:
@@ -361,25 +385,23 @@ class Orchestrator:
 
         old_apps = set(self.config.apps.keys())
         new_apps = set(new_config.apps.keys())
-
         added = new_apps - old_apps
         removed = old_apps - new_apps
         common = old_apps & new_apps
 
-        # Apps removidos: desabilitar e limpar estado
         for name in removed:
             logger.info(f"[{name}] Removido do config.yaml — desabilitando")
             if self.state.apps.get(name) and self.state.apps[name].enabled:
                 self._disable_app(name)
             self.state.apps.pop(name, None)
 
-        # Apps novos: registrar no state
         for name in added:
             cfg = new_config.apps[name]
-            logger.info(f"[{name}] Novo app detectado — slot={cfg.slot}, schedule={cfg.schedule}")
+            logger.info(
+                f"[{name}] Novo app — slot={cfg.slot}, schedule={cfg.schedule}"
+            )
             self.state.apps[name] = AppState(name=name, slot=cfg.slot)
 
-        # Apps alterados: detectar mudanças relevantes
         changed = []
         for name in common:
             old_cfg = self.config.apps[name]
@@ -395,16 +417,14 @@ class Orchestrator:
             ):
                 changed.append(name)
 
-        # Atualizar config de referência ANTES de re-aplicar os apps alterados
         self.config = new_config
+        self.state.ram_safety_margin_mb = new_config.ram_safety_margin_mb
 
         for name in changed:
             was_enabled = self.state.apps[name].enabled
             logger.info(f"[{name}] Config alterado — reaplicando (enabled={was_enabled})")
-            # Slot pode ter mudado — atualizar no state
             self.state.apps[name].slot = new_config.apps[name].slot
             if was_enabled:
-                # Reiniciar: desabilitar e reabilitar
                 self._disable_app(name)
                 self._enable_app(name)
 
@@ -414,12 +434,13 @@ class Orchestrator:
         )
 
     async def _monitor_loop(self) -> None:
-        """Loop de monitoramento: atualiza métricas e processa comandos."""
+        """Loop de monitoramento: métricas, hot reload, comandos."""
         while self._running:
             # Métricas de sistema
             sys_metrics = get_system_metrics()
             self.state.total_ram_mb = sys_metrics["used_ram_mb"]
             self.state.total_cpu_pct = sys_metrics["cpu_pct"]
+            self.state.available_ram_mb = sys_metrics["available_ram_mb"]
 
             # Métricas por processo ativo
             for name, manager in self.managers.items():
@@ -429,30 +450,25 @@ class Orchestrator:
                     self.state.apps[name].ram_mb = m.ram_mb
                     self.state.apps[name].cpu_pct = m.cpu_pct
 
-            # Hot reload do config.yaml
+            # Hot reload
             if self._check_config_changed():
                 logger.info("Mudança detectada em config.yaml — recarregando")
                 self._reload_config()
 
-            # Processar comandos da UI
+            # Comandos
             commands = read_commands(self._commands_dir)
             for cmd in commands:
                 self._handle_command(cmd)
 
-            # Atualizar next_run dos jobs agendados
-            for job in self.scheduler.get_jobs():
-                app_name = job.id
-                if app_name in self.state.apps:
-                    next_fire = job.next_run_time
-                    if next_fire:
-                        self.state.apps[app_name].next_run = next_fire.strftime("%H:%M:%S")
+            # Acordar quem aguarda RAM (pode ter liberado passivamente)
+            if self._memory_queue:
+                self._release_memory_event()
 
             self._update_slot_counts()
             save_state(self.state)
             await asyncio.sleep(5)
 
     def _handle_command(self, cmd: Command) -> None:
-        """Processa um comando recebido da UI."""
         logger.info(f"Comando recebido: {cmd.action} {cmd.app_name}")
         if cmd.action == "start":
             self._enable_app(cmd.app_name)
@@ -473,17 +489,15 @@ class Orchestrator:
     # ── Lifecycle ───────────────────────────────────────────────
 
     async def start(self) -> None:
-        """Inicia o orquestrador em modo IDLE — apps só rodam quando ativados."""
         logger.info("=" * 60)
         logger.info("HIDRA CONTROL PLANE — Iniciando (modo idle)")
         logger.info(f"Apps configuradas: {len(self.config.apps)}")
+        logger.info(f"RAM safety margin: {self.config.ram_safety_margin_mb} MB")
         logger.info("=" * 60)
 
         self._init_app_states()
-        self.scheduler.start()
         await self.alerter.alert_started()
 
-        # Auto-start: ativar apenas apps marcados com auto_start: true
         auto_started = []
         for name, cfg in self.config.apps.items():
             if cfg.auto_start:
@@ -498,14 +512,11 @@ class Orchestrator:
         save_state(self.state)
         logger.info("Orquestrador rodando. Use o dashboard para controlar os apps.")
 
-        # Monitor loop roda indefinidamente
         await self._monitor_loop()
 
     async def stop(self) -> None:
-        """Para o orquestrador gracefully."""
         logger.info("Parando orquestrador...")
         self._running = False
-        self.scheduler.shutdown(wait=False)
 
         for name, manager in self.managers.items():
             if manager.is_alive():
