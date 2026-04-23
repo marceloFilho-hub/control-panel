@@ -8,8 +8,10 @@ from pathlib import Path
 import streamlit as st
 
 from app_discovery import APPS_DIR, scan_apps_dir
-from config_writer import read_config_raw, upsert_app
+from config_writer import delete_app, read_config_raw, upsert_app
 from executable_detector import build_command
+from python_app_runner import build_command as py_build_command
+from python_app_runner import detect_project
 from execution_logger import (
     get_latest_log_path,
     list_apps_with_logs,
@@ -336,11 +338,15 @@ def render_queue_view(state: ControlPlaneState) -> None:
 # ═══════════════════════════════════════════════════════════════
 
 def render_config_tab(state: ControlPlaneState) -> None:
+    # ── Seção 1: Cadastrar app Python diretamente ────────────────────
+    _render_python_registration(state)
+    st.divider()
+
+    # ── Seção 2: Apps cadastrados (Python + pasta) ───────────────────
     st.markdown("### ⚙️ Apps da pasta `apps_executaveis/`")
     st.caption(
-        f"Solte arquivos `.vbs`, `.exe`, `.bat`, `.ps1`, `.py` ou `.lnk` em "
-        f"`{APPS_DIR}` e eles aparecem aqui automaticamente. "
-        f"Marque ✓ para ativar, defina o tempo entre rodagens e pronto."
+        f"Alternativa mais simples que VBS: cole o caminho do `main.py` acima. "
+        f"Ou para apps não-Python, coloque `.exe`/`.bat`/`.ps1` em `{APPS_DIR}`."
     )
 
     c_scan, _ = st.columns([1, 5])
@@ -351,6 +357,14 @@ def render_config_tab(state: ControlPlaneState) -> None:
     discovered = scan_apps_dir()
     raw = read_config_raw(CONFIG_PATH)
     apps = raw.get("apps", {})
+
+    # Listar apps Python cadastrados (marcados com _source=python)
+    python_apps = {n: d for n, d in apps.items() if d.get("_source") == "python"}
+    if python_apps:
+        st.markdown("### \U0001f40d Apps Python cadastrados")
+        for name, data in python_apps.items():
+            _render_python_app_row(name, data, state)
+        st.divider()
 
     if not discovered:
         st.warning(
@@ -364,6 +378,223 @@ def render_config_tab(state: ControlPlaneState) -> None:
     for app in discovered:
         existing = apps.get(app.name, {})
         _render_pasta_row(app, existing, state)
+
+
+def _render_python_registration(state: ControlPlaneState) -> None:
+    """Seção para cadastrar um app Python apontando para o main.py.
+
+    Detecta automaticamente o .venv e o .env do projeto. Modo direto,
+    sem VBS/bat intermediários.
+    """
+    st.markdown("### \U0001f40d Cadastrar app Python")
+    st.caption(
+        "Cole o caminho do `main.py` (ou `monitor_ui.py`, etc.) e o Control "
+        "Panel detecta automaticamente o `.venv` e o `.env` do projeto."
+    )
+
+    with st.expander("➕ Adicionar app Python (sem VBS/bat)", expanded=False):
+        with st.form("py_new_app"):
+            cols = st.columns([3, 1])
+            with cols[0]:
+                script_path = st.text_input(
+                    "Caminho do script Python *",
+                    placeholder="C:/Users/.../meu_projeto/src/main.py",
+                    help="Cole o caminho completo do arquivo .py. O venv e o .env são descobertos automaticamente nas pastas pai.",
+                )
+            with cols[1]:
+                app_name = st.text_input(
+                    "Nome *",
+                    placeholder="meu_app",
+                    help="Identificador curto (sem espaços).",
+                )
+
+            # Preview da detecção
+            if script_path.strip():
+                try:
+                    project = detect_project(script_path.strip())
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        if project.has_venv:
+                            st.success(f"✅ venv detectado: `{project.python_exe}`")
+                        else:
+                            st.warning("⚠️ Sem .venv detectado — vai usar Python global")
+                    with c2:
+                        if project.env_file:
+                            st.success(f"✅ .env detectado: `{project.env_file.name}`")
+                        else:
+                            st.info("ℹ️ Nenhum .env detectado (opcional)")
+                except Exception as e:
+                    st.error(f"Erro ao analisar path: {e}")
+
+            st.markdown("**Configuração inicial**")
+            c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+            with c1:
+                slot = st.selectbox("Slot", ["light", "heavy", "always"], index=0)
+            with c2:
+                ram = st.number_input("RAM máx (MB)", min_value=64, max_value=16384, value=512, step=64)
+            with c3:
+                args_input = st.text_input("Argumentos (opcional)", placeholder="--once --verbose")
+            with c4:
+                gui_chk = st.checkbox("📺 GUI", help="Marcar se o app abre janela (Tkinter, PyQt...)")
+
+            submit = st.form_submit_button("➕ Cadastrar app", type="primary")
+
+            if submit:
+                if not script_path.strip() or not app_name.strip():
+                    st.error("Preencha o caminho do script e o nome do app.")
+                elif not Path(script_path.strip()).exists():
+                    st.error(f"Arquivo não encontrado: {script_path}")
+                else:
+                    project = detect_project(script_path.strip())
+                    cmd, cwd = py_build_command(project, args_input.strip(), gui=gui_chk)
+                    app_data = {
+                        "slot": slot,
+                        "cwd": cwd,
+                        "cmd": cmd,
+                        "schedule": "manual",
+                        "max_ram_mb": int(ram),
+                        "timeout": 3600,
+                        "_source": "python",
+                    }
+                    if project.env_file:
+                        app_data["env_file"] = str(project.env_file).replace("\\", "/")
+                    if gui_chk:
+                        app_data["gui"] = True
+
+                    upsert_app(CONFIG_PATH, app_name.strip(), app_data)
+                    st.success(
+                        f"✅ '{app_name}' cadastrado. Ajuste abaixo quando quiser "
+                        f"(tempo entre rodagens, slot, etc.) ou clique em ▶ Start."
+                    )
+                    st.rerun()
+
+
+def _render_python_app_row(name: str, data: dict, state: ControlPlaneState) -> None:
+    """Card inline para app Python cadastrado (com opções editáveis)."""
+    app_state = state.apps.get(name)
+
+    # Status badge
+    live_badge = ""
+    if app_state:
+        color = STATUS_COLORS.get(app_state.status, TEXT_MUTED)
+        icon = STATUS_ICONS.get(app_state.status, "?")
+        live_badge = (
+            f"<span style='color:{color};font-size:1.1em'>{icon}</span> "
+            f"<span style='color:{TEXT_MUTED}'>{app_state.status}</span>"
+        )
+
+    gui_flag = "📺 " if data.get("gui") else ""
+    st.markdown(
+        f"#### \U0001f40d {gui_flag}<strong translate='no'>{name}</strong> {live_badge}",
+        unsafe_allow_html=True,
+    )
+    st.caption(f"Comando: `{data.get('cmd', '')}`")
+    st.caption(f"cwd: `{data.get('cwd', '')}`" + (f" | env_file: `{data.get('env_file')}`" if data.get("env_file") else ""))
+
+    current_pause = int(data.get("pause_between", 600))
+    current_slot = data.get("slot", "light")
+    current_ram = int(data.get("max_ram_mb", 512))
+    is_loop = data.get("schedule") == "loop" or data.get("auto_start", False)
+
+    c1, c2, c3, c4, c5, c6 = st.columns([1.2, 2, 1.2, 1.2, 1, 1])
+
+    with c1:
+        enabled_chk = st.checkbox(
+            "Executar",
+            value=is_loop,
+            key=f"py_en_{name}",
+        )
+    with c2:
+        if current_pause >= 3600 and current_pause % 3600 == 0:
+            du, dv = "horas", current_pause // 3600
+        elif current_pause >= 60 and current_pause % 60 == 0:
+            du, dv = "minutos", current_pause // 60
+        else:
+            du, dv = "segundos", current_pause
+        tc1, tc2 = st.columns([1, 1])
+        with tc1:
+            val = st.number_input(
+                "Tempo entre rodagens",
+                min_value=1, max_value=86400,
+                value=int(dv),
+                key=f"py_pv_{name}",
+            )
+        with tc2:
+            unit = st.selectbox(
+                "Un.",
+                ["segundos", "minutos", "horas"],
+                index=["segundos", "minutos", "horas"].index(du),
+                key=f"py_pu_{name}",
+            )
+        pause_seconds = int(val) * {"segundos": 1, "minutos": 60, "horas": 3600}[unit]
+    with c3:
+        slot = st.selectbox(
+            "Slot",
+            ["heavy", "light", "always"],
+            index=["heavy", "light", "always"].index(current_slot),
+            key=f"py_slot_{name}",
+        )
+    with c4:
+        ram = st.number_input(
+            "RAM máx (MB)",
+            min_value=64, max_value=16384,
+            value=current_ram, step=64,
+            key=f"py_ram_{name}",
+        )
+    with c5:
+        st.write("")
+        st.write("")
+        save = st.button("\U0001f4be Salvar", key=f"py_sv_{name}", type="primary", use_container_width=True)
+    with c6:
+        st.write("")
+        st.write("")
+        remove = st.button("\U0001f5d1️", key=f"py_rm_{name}", help="Remover app", use_container_width=True)
+
+    gui_chk = st.checkbox(
+        "\U0001f4fa Interface gráfica (GUI) — CREATE_BREAKAWAY_FROM_JOB",
+        value=data.get("gui", False),
+        key=f"py_gui_{name}",
+    )
+
+    if save:
+        updated = {**data, "slot": slot, "max_ram_mb": int(ram)}
+        updated["schedule"] = "loop" if enabled_chk and slot != "always" else "manual"
+        if enabled_chk and slot != "always":
+            updated["pause_between"] = pause_seconds
+        else:
+            updated.pop("pause_between", None)
+        if enabled_chk and slot == "always":
+            updated["auto_start"] = True
+        else:
+            updated.pop("auto_start", None)
+        if gui_chk:
+            updated["gui"] = True
+        else:
+            updated.pop("gui", None)
+        upsert_app(CONFIG_PATH, name, updated)
+        st.success(f"✅ '{name}' atualizado — hot reload em até 5s")
+        st.rerun()
+
+    if remove:
+        delete_app(CONFIG_PATH, name)
+        st.success(f"✅ '{name}' removido")
+        st.rerun()
+
+    # Atalhos Start/Stop
+    if app_state:
+        bc1, bc2, _ = st.columns([1, 1, 6])
+        with bc1:
+            if not app_state.enabled:
+                if st.button("▶ Start", key=f"py_start_{name}"):
+                    send_command("start", name)
+                    st.rerun()
+        with bc2:
+            if app_state.enabled:
+                if st.button("■ Stop", key=f"py_stop_{name}"):
+                    send_command("stop", name)
+                    st.rerun()
+
+    st.divider()
 
 
 def _render_pasta_row(app, existing: dict, state: ControlPlaneState) -> None:

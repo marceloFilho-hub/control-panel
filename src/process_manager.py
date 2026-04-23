@@ -12,6 +12,7 @@ from loguru import logger
 from .alerter import TelegramAlerter
 from .config_loader import AppConfig
 from .execution_logger import ExecutionLogger
+from .python_app_runner import load_env_file
 from .resource_monitor import get_process_metrics, get_system_metrics, kill_process_tree
 from .state import AppState
 from .windows_job import JobObject
@@ -39,7 +40,23 @@ class ProcessManager:
             self.state.last_error = f"cwd não existe: {cwd}"
             return None
 
-        env = {**os.environ, "PYTHONUTF8": "1", **self.cfg.env}
+        # Base: environment atual + PYTHONUTF8 + overrides manuais
+        env = {**os.environ, "PYTHONUTF8": "1"}
+
+        # Carregar .env do projeto (se configurado)
+        if self.cfg.env_file:
+            try:
+                loaded = load_env_file(Path(self.cfg.env_file))
+                if loaded:
+                    env.update(loaded)
+                    logger.info(
+                        f"[{self.cfg.name}] Carregadas {len(loaded)} vars de {self.cfg.env_file}"
+                    )
+            except Exception as e:
+                logger.warning(f"[{self.cfg.name}] Falha ao carregar .env: {e}")
+
+        # Overrides manuais do config.yaml (maior prioridade)
+        env.update(self.cfg.env)
 
         logger.info(f"[{self.cfg.name}] Iniciando: {self.cfg.cmd} em {cwd}")
 
