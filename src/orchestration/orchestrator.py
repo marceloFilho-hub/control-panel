@@ -55,7 +55,9 @@ class Orchestrator:
         self.managers: dict[str, ProcessManager] = {}
         self._running = True
         self._app_tasks: dict[str, asyncio.Task] = {}
-        self._commands_dir = Path(__file__).parent.parent / "commands"
+        # Raiz do projeto = 3 níveis acima (src/orchestration/orchestrator.py → ../../..)
+        _root = Path(__file__).resolve().parent.parent.parent
+        self._commands_dir = _root / "commands"
         self._commands_dir.mkdir(exist_ok=True)
         # Filas rastreáveis
         self._heavy_queue: list[str] = []
@@ -64,7 +66,7 @@ class Orchestrator:
         # Evento sinalizado quando RAM libera — desperta quem aguarda memória
         self._memory_event = asyncio.Event()
         # Hot reload do config.yaml
-        self._config_path = Path(__file__).parent.parent / "config.yaml"
+        self._config_path = _root / "config.yaml"
         self._last_config_mtime = (
             self._config_path.stat().st_mtime if self._config_path.exists() else 0.0
         )

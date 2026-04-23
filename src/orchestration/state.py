@@ -47,7 +47,8 @@ class ControlPlaneState:
     config_mtime: float = 0.0  # última modificação do config.yaml (para hot reload)
 
 
-STATE_FILE = Path(__file__).parent.parent / "state.json"
+# Raiz do projeto = 3 níveis acima (src/orchestration/state.py → ../../..)
+STATE_FILE = Path(__file__).resolve().parent.parent.parent / "state.json"
 _lock = threading.Lock()
 
 
@@ -140,7 +141,7 @@ def write_command(commands_dir: Path, action: str, app_name: str = "") -> None:
 
 def read_commands(commands_dir: Path | None = None) -> list[Command]:
     """Lê e remove arquivos .trigger do diretório de comandos."""
-    d = commands_dir or (Path(__file__).parent.parent / "commands")
+    d = commands_dir or (Path(__file__).resolve().parent.parent.parent / "commands")
     commands: list[Command] = []
     if not d.exists():
         return commands

@@ -18,7 +18,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import IO
 
-LOGS_ROOT = Path(__file__).parent.parent / "logs"
+# Raiz do projeto = 3 níveis acima (src/observability/logger.py → ../../..)
+LOGS_ROOT = Path(__file__).resolve().parent.parent.parent / "logs"
 MAX_HISTORY_LINES = 500  # mantém as últimas N execuções no history.jsonl
 
 
