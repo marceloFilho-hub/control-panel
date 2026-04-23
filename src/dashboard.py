@@ -7,9 +7,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from app_discovery import APPS_DIR, scan_apps_dir
 from config_writer import delete_app, read_config_raw, upsert_app
-from executable_detector import build_command
 from python_app_runner import build_command as py_build_command
 from python_app_runner import detect_project
 from execution_logger import (
@@ -338,46 +336,24 @@ def render_queue_view(state: ControlPlaneState) -> None:
 # ═══════════════════════════════════════════════════════════════
 
 def render_config_tab(state: ControlPlaneState) -> None:
-    # ── Seção 1: Cadastrar app Python diretamente ────────────────────
+    # ── Seção 1: Cadastrar app Python ────────────────────────────────
     _render_python_registration(state)
     st.divider()
 
-    # ── Seção 2: Apps cadastrados (Python + pasta) ───────────────────
-    st.markdown("### ⚙️ Apps da pasta `apps_executaveis/`")
-    st.caption(
-        f"Alternativa mais simples que VBS: cole o caminho do `main.py` acima. "
-        f"Ou para apps não-Python, coloque `.exe`/`.bat`/`.ps1` em `{APPS_DIR}`."
-    )
-
-    c_scan, _ = st.columns([1, 5])
-    with c_scan:
-        if st.button("\U0001f504 Rescanear pasta", use_container_width=True):
-            st.rerun()
-
-    discovered = scan_apps_dir()
+    # ── Seção 2: Apps cadastrados ────────────────────────────────────
     raw = read_config_raw(CONFIG_PATH)
     apps = raw.get("apps", {})
 
-    # Listar apps Python cadastrados (marcados com _source=python)
-    python_apps = {n: d for n, d in apps.items() if d.get("_source") == "python"}
-    if python_apps:
-        st.markdown("### \U0001f40d Apps Python cadastrados")
-        for name, data in python_apps.items():
-            _render_python_app_row(name, data, state)
-        st.divider()
-
-    if not discovered:
-        st.warning(
-            f"Nenhum arquivo executável na pasta.\n\n"
-            f"Cole `.vbs` / `.exe` / `.bat` / `.ps1` / `.py` / `.lnk` em:\n"
-            f"`{APPS_DIR}`"
+    if not apps:
+        st.info(
+            "Nenhum app cadastrado ainda. Use o formulário acima para "
+            "apontar para o `main.py` do seu projeto."
         )
         return
 
-    st.markdown(f"**{len(discovered)} arquivo(s) encontrado(s):**")
-    for app in discovered:
-        existing = apps.get(app.name, {})
-        _render_pasta_row(app, existing, state)
+    st.markdown("### \U0001f40d Apps cadastrados")
+    for name, data in apps.items():
+        _render_python_app_row(name, data, state)
 
 
 def _render_python_registration(state: ControlPlaneState) -> None:
@@ -595,180 +571,6 @@ def _render_python_app_row(name: str, data: dict, state: ControlPlaneState) -> N
                     st.rerun()
 
     st.divider()
-
-
-def _render_pasta_row(app, existing: dict, state: ControlPlaneState) -> None:
-    """Linha inline para um app descoberto na pasta apps_executaveis/."""
-    is_cadastrado = bool(existing)
-    app_state = state.apps.get(app.name)
-
-    # Status live
-    live_badge = ""
-    if app_state:
-        color = STATUS_COLORS.get(app_state.status, TEXT_MUTED)
-        icon = STATUS_ICONS.get(app_state.status, "?")
-        live_badge = (
-            f"<span style='color:{color};font-size:1.1em'>{icon}</span> "
-            f"<span style='color:{TEXT_MUTED}'>{app_state.status}</span>"
-        )
-
-    # Slot atual
-    current_slot = existing.get("slot", "light")
-    current_schedule = existing.get("schedule", "manual")
-    current_pause = int(existing.get("pause_between", 600))
-    current_ram = int(existing.get("max_ram_mb", 512))
-    current_auto = bool(existing.get("auto_start", False))
-    is_enabled_in_config = current_schedule == "loop" or current_auto
-
-    with st.container():
-        st.markdown(
-            f"#### {app.icon} **{app.name}** "
-            f"<span style='color:{TEXT_MUTED};font-weight:normal'>"
-            f"({app.info.display_kind})</span> {live_badge}",
-            unsafe_allow_html=True,
-        )
-        st.caption(f"📄 `{app.file_path}`")
-
-        c1, c2, c3, c4, c5 = st.columns([1.2, 2, 1.2, 1.2, 1.2])
-
-        # 1) Checkbox: Ativar rodagem periódica
-        with c1:
-            enabled = st.checkbox(
-                "Executar",
-                value=is_enabled_in_config,
-                key=f"enable_{app.name}",
-                help=(
-                    "Marcado: app roda a cada 'tempo entre rodagens'. "
-                    "Desmarcado: fica disponível para disparo manual na aba Status."
-                ),
-            )
-
-        # 2) Tempo entre rodagens com unidade
-        with c2:
-            if current_pause >= 3600 and current_pause % 3600 == 0:
-                default_unit = "horas"
-                default_val = current_pause // 3600
-            elif current_pause >= 60 and current_pause % 60 == 0:
-                default_unit = "minutos"
-                default_val = current_pause // 60
-            else:
-                default_unit = "segundos"
-                default_val = current_pause
-
-            tc1, tc2 = st.columns([1, 1])
-            with tc1:
-                val = st.number_input(
-                    "Tempo entre rodagens",
-                    min_value=1,
-                    max_value=86400,
-                    value=int(default_val),
-                    key=f"pause_v_{app.name}",
-                )
-            with tc2:
-                unit = st.selectbox(
-                    "Unidade",
-                    ["segundos", "minutos", "horas"],
-                    index=["segundos", "minutos", "horas"].index(default_unit),
-                    key=f"pause_u_{app.name}",
-                    label_visibility="visible",
-                )
-            multiplier = {"segundos": 1, "minutos": 60, "horas": 3600}[unit]
-            pause_seconds = int(val) * multiplier
-
-        # 3) Slot
-        with c3:
-            slot = st.selectbox(
-                "Slot",
-                ["heavy", "light", "always"],
-                index=["heavy", "light", "always"].index(current_slot),
-                key=f"slot_{app.name}",
-                help="heavy = 1 por vez | light = até 3 paralelos | always = permanente",
-            )
-
-        # 4) Memória máxima
-        with c4:
-            ram = st.number_input(
-                "Memória máx (MB)",
-                min_value=64,
-                max_value=16384,
-                value=current_ram,
-                step=64,
-                key=f"ram_{app.name}",
-            )
-
-        # 5) Botão Salvar
-        with c5:
-            st.write("")
-            st.write("")
-            save_clicked = st.button(
-                "\U0001f4be Salvar",
-                key=f"save_{app.name}",
-                type="primary",
-                use_container_width=True,
-            )
-
-        # Checkbox GUI — força o app a escapar do Job Object para que
-        # a janela (Tkinter/PyQt/etc.) apareça no desktop do usuário.
-        gui_value = st.checkbox(
-            "\U0001f4fa Interface gráfica (GUI) — marque se o app abre janela visível",
-            value=existing.get("gui", False),
-            key=f"gui_{app.name}",
-            help=(
-                "Quando marcado, o app é lançado com flags CREATE_BREAKAWAY_FROM_JOB "
-                "+ DETACHED_PROCESS para herdar o desktop interativo do usuário. "
-                "Sem isso, janelas GUI ficam invisíveis quando o app é lançado "
-                "pelo orquestrador."
-            ),
-        )
-
-        if save_clicked:
-            cmd, cwd = build_command(str(app.file_path))
-            app_data = {
-                "slot": slot,
-                "cwd": cwd,
-                "cmd": cmd,
-                "schedule": "loop" if enabled and slot != "always" else "manual",
-                "max_ram_mb": int(ram),
-                "timeout": int(existing.get("timeout", 600)),
-                "_source": "pasta",
-            }
-            if enabled and slot != "always":
-                app_data["pause_between"] = pause_seconds
-            if enabled and slot == "always":
-                app_data["auto_start"] = True
-            if existing.get("restart_on_crash"):
-                app_data["restart_on_crash"] = True
-            if gui_value:
-                app_data["gui"] = True
-
-            upsert_app(CONFIG_PATH, app.name, app_data)
-            st.success(
-                f"✅ '{app.name}' salvo — hot reload em até 5s"
-                + (" (vai começar a rodar)" if enabled else " (ficou em modo manual)")
-            )
-            st.rerun()
-
-        # Botões Start/Stop inline (atalhos pra aba Status)
-        if app_state and is_cadastrado:
-            bc1, bc2, _ = st.columns([1, 1, 6])
-            with bc1:
-                if not app_state.enabled:
-                    if st.button(
-                        "▶ Start agora", key=f"instart_{app.name}",
-                        use_container_width=True,
-                    ):
-                        send_command("start", app.name)
-                        st.rerun()
-            with bc2:
-                if app_state.enabled:
-                    if st.button(
-                        "■ Stop", key=f"instop_{app.name}",
-                        use_container_width=True,
-                    ):
-                        send_command("stop", app.name)
-                        st.rerun()
-
-        st.divider()
 
 
 

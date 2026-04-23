@@ -16,3 +16,4 @@ build/
 # Cada ambiente tem o seu. O template versionado é config.example.yaml.
 config.yaml
 config.yaml.bak-*
+state.tmp*
