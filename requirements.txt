@@ -1,0 +1,24 @@
+# ═══════════════════════════════════════════════════════════════════
+#  Hidra Control Plane — Dependências Python
+#
+#  Mantém paridade com as deps declaradas em pyproject.toml.
+#  Instalação:   pip install -r requirements.txt
+#  Pinned:       gere com `pip freeze > requirements.lock` se precisar
+#                de reprodutibilidade exata.
+# ═══════════════════════════════════════════════════════════════════
+
+# Core — orquestração e runtime
+psutil>=5.9.0
+pyyaml>=6.0
+loguru>=0.7.0
+python-dotenv>=1.0.0
+
+# HTTP (Telegram Bot API)
+httpx>=0.27.0
+
+# Dashboard web
+streamlit>=1.35.0
+streamlit-autorefresh>=1.0.0
+
+# Windows-only (Job Objects + .lnk resolver)
+pywin32>=305; platform_system == 'Windows'

@@ -82,10 +82,29 @@ echo.
 echo [3/4] Instalando dependencias (pode demorar 1-3 min)...
 
 "%VENV_PY%" -m pip install --upgrade pip --quiet
+if errorlevel 1 (
+    echo [ERRO] Falha ao atualizar pip
+    pause
+    exit /b 1
+)
+
+REM Prioridade 1: requirements.txt (mais explicito, ideal pra deploy)
+if exist "%ROOT%\requirements.txt" (
+    echo        instalando de requirements.txt...
+    "%VENV_PY%" -m pip install -r "%ROOT%\requirements.txt" --quiet
+    if errorlevel 1 (
+        echo [ERRO] Falha ao instalar de requirements.txt
+        pause
+        exit /b 1
+    )
+)
+
+REM Prioridade 2: pyproject.toml (instala o pacote em modo editavel
+REM para que `python -m src.main` funcione como entry point)
 "%VENV_PY%" -m pip install -e "%ROOT%" --quiet
 
 if errorlevel 1 (
-    echo [ERRO] Falha ao instalar dependencias. Rode manualmente:
+    echo [ERRO] Falha ao instalar o projeto em modo editavel. Rode:
     echo        %VENV_PY% -m pip install -e %ROOT%
     pause
     exit /b 1

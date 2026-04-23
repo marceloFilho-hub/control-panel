@@ -2,23 +2,30 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime
 from pathlib import Path
 
+# Garante que `src.xxx` seja importável quando Streamlit roda este arquivo
+# como script (fora do contexto de pacote).
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 import streamlit as st
 
-from config_writer import delete_app, read_config_raw, upsert_app
-from python_app_runner import build_command as py_build_command
-from python_app_runner import detect_project
-from execution_logger import (
+from src.config.writer import delete_app, read_config_raw, upsert_app
+from src.observability.logger import (
     get_latest_log_path,
     list_apps_with_logs,
     read_history,
     read_log_content,
 )
-from state import AppState, ControlPlaneState, load_state, write_command
+from src.orchestration.state import AppState, ControlPlaneState, load_state, write_command
+from src.process.python_runner import build_command as py_build_command
+from src.process.python_runner import detect_project
 
-ROOT = Path(__file__).parent.parent
+ROOT = _PROJECT_ROOT
 COMMANDS_DIR = ROOT / "commands"
 CONFIG_PATH = ROOT / "config.yaml"
 COMMANDS_DIR.mkdir(exist_ok=True)

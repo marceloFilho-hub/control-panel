@@ -24,10 +24,10 @@ from pathlib import Path
 
 from loguru import logger
 
-from .alerter import TelegramAlerter
-from .config_loader import ControlPlaneConfig, load_config
-from .process_manager import ProcessManager
-from .resource_monitor import get_system_metrics
+from ..config.loader import ControlPlaneConfig, load_config
+from ..observability.alerter import TelegramAlerter
+from ..process.manager import ProcessManager
+from ..process.resource_monitor import get_system_metrics
 from .state import (
     AppState,
     Command,
@@ -445,7 +445,7 @@ class Orchestrator:
             # Métricas por processo ativo
             for name, manager in self.managers.items():
                 if manager.is_alive():
-                    from .resource_monitor import get_process_metrics
+                    from ..process.resource_monitor import get_process_metrics
                     m = get_process_metrics(self.state.apps[name].pid)
                     self.state.apps[name].ram_mb = m.ram_mb
                     self.state.apps[name].cpu_pct = m.cpu_pct

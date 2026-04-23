@@ -9,12 +9,12 @@ from pathlib import Path
 
 from loguru import logger
 
-from .alerter import TelegramAlerter
-from .config_loader import AppConfig
-from .execution_logger import ExecutionLogger
-from .python_app_runner import load_env_file
+from ..config.loader import AppConfig
+from ..observability.alerter import TelegramAlerter
+from ..observability.logger import ExecutionLogger
+from ..orchestration.state import AppState
+from .python_runner import load_env_file
 from .resource_monitor import get_process_metrics, get_system_metrics, kill_process_tree
-from .state import AppState
 from .windows_job import JobObject
 
 
@@ -380,7 +380,7 @@ class ProcessManager:
             err_snippet = ""
             if self._exec_logger:
                 try:
-                    from .execution_logger import read_log_content
+                    from ..observability.logger import read_log_content
                     content = read_log_content(self._exec_logger.record.log_file, tail_kb=4)
                     err_lines = [l for l in content.splitlines() if l.startswith("[err]")]
                     err_snippet = "\n".join(err_lines[-20:])[:500]

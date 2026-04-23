@@ -15,8 +15,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from loguru import logger
 
-from .config_loader import load_config
-from .orchestrator import Orchestrator
+from .config.loader import load_config
+from .orchestration.orchestrator import Orchestrator
 
 ROOT = Path(__file__).parent.parent
 LOG_DIR = ROOT / "logs"
@@ -42,7 +42,7 @@ def setup_logging(log_dir: str, rotation: str, retention: int) -> None:
 
 def start_dashboard() -> subprocess.Popen | None:
     """Inicia o dashboard Streamlit como processo separado."""
-    dashboard_path = ROOT / "src" / "dashboard.py"
+    dashboard_path = ROOT / "src" / "ui" / "dashboard.py"
     if not dashboard_path.exists():
         logger.warning("dashboard.py não encontrado, pulando")
         return None

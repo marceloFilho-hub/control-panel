@@ -537,30 +537,69 @@ O `_monitor_loop` lê e remove os triggers a cada 5s. O dashboard usa
 
 ## Estrutura do projeto
 
+Organização por **domínio** (boas práticas open source). Cada subpacote
+tem uma única responsabilidade e expõe sua API via `__init__.py`.
+
 ```
 control_panel/
-├── .streamlit/
-│   └── config.toml              # tema light do Streamlit
-├── .claude/
-│   └── settings.json            # permissões do Claude Code
+├── .streamlit/config.toml       # tema light do Streamlit
+├── .claude/settings.json        # permissões do Claude Code
+├── scripts/                     # instalação e launcher
+│   ├── install.bat              # cria venv + deps + atalho desktop
+│   ├── iniciar_painel.vbs       # launcher silencioso (alvo do atalho)
+│   └── desinstalar.bat          # remove atalho + mata processo
 ├── src/
-│   ├── main.py                  # entry point (asyncio + dashboard)
-│   ├── orchestrator.py          # core — scheduler + semáforos + memory gate
-│   ├── process_manager.py       # lifecycle por processo + monitoramento
-│   ├── windows_job.py           # wrapper de Job Objects
-│   ├── python_app_runner.py     # detect .venv/.env + build_command
-│   ├── executable_detector.py   # heurísticas para .exe/.bat/.ps1/.lnk
-│   ├── config_loader.py         # parse do config.yaml + dataclasses
-│   ├── config_writer.py         # CRUD do config.yaml
-│   ├── execution_logger.py      # history.jsonl por app + logs individuais
-│   ├── resource_monitor.py      # psutil wrappers (RAM/CPU/kill_tree)
-│   ├── state.py                 # ControlPlaneState + Command + serialization
-│   ├── alerter.py               # Telegram Bot API (httpx async)
-│   └── dashboard.py             # Streamlit app (5 abas + fragments)
-├── config.example.yaml          # template
+│   ├── __init__.py
+│   ├── main.py                  # ⭐ ENTRY POINT (único arquivo na raiz)
+│   │
+│   ├── config/                  # 📝 leitura e escrita do config.yaml
+│   │   ├── loader.py            #   parse + dataclasses (AppConfig etc.)
+│   │   └── writer.py            #   CRUD atômico com tmp+rename
+│   │
+│   ├── orchestration/           # 🎯 core — scheduler, filas, state
+│   │   ├── orchestrator.py      #   semáforos + memory gate + hot reload
+│   │   └── state.py             #   ControlPlaneState + Command + IPC
+│   │
+│   ├── process/                 # ⚙️ ciclo de vida dos subprocessos
+│   │   ├── manager.py           #   subprocess + monitoramento + cleanup
+│   │   ├── python_runner.py     #   detecta .venv/.env de projetos Python
+│   │   ├── windows_job.py       #   wrapper Windows Job Objects (pywin32)
+│   │   └── resource_monitor.py  #   psutil (RAM/CPU/kill_tree)
+│   │
+│   ├── observability/           # 👁 logs e alertas
+│   │   ├── logger.py            #   ExecutionLogger + history.jsonl
+│   │   └── alerter.py           #   Telegram Bot API (httpx async)
+│   │
+│   └── ui/                      # 🖥️ interface web
+│       └── dashboard.py         #   Streamlit (5 abas + fragments)
+│
+├── logs/                        # logs persistentes (gitignore)
+│   ├── hidra_control.log        # log geral (rotativo)
+│   └── {app_name}/              # por app
+│       ├── history.jsonl
+│       └── {timestamp}_{id}.log
+│
+├── commands/                    # IPC dashboard → orchestrator
+│   └── *.trigger                # arquivos atômicos (gitignore)
+│
+├── config.example.yaml          # template versionado
+├── config.yaml                  # específico da máquina (gitignore)
 ├── pyproject.toml               # deps + entry point
 └── README.md                    # este arquivo
 ```
+
+### Regras de dependência entre subpacotes
+
+```
+ui ──────▶ config, orchestration, process, observability
+orchestration ─▶ config, process, observability
+process ─────▶ config, observability
+observability ▶ (sem deps internos)
+config ──────▶ (sem deps internos)
+```
+
+Sem ciclos. `observability` e `config` são as folhas — módulos puros
+sem dependências entre pacotes internos.
 
 ---
 
