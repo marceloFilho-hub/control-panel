@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shlex
 import time
 from pathlib import Path
 
@@ -40,14 +39,6 @@ class ProcessManager:
             self.state.last_error = f"cwd não existe: {cwd}"
             return None
 
-        parts = shlex.split(self.cfg.cmd, posix=False)
-        cmd_path = cwd / parts[0]
-
-        # Resolve .venv paths no Windows
-        if not cmd_path.exists() and "/" in parts[0]:
-            # Tenta path absoluto como está
-            cmd_path = Path(parts[0])
-
         env = {**os.environ, "PYTHONUTF8": "1", **self.cfg.env}
 
         logger.info(f"[{self.cfg.name}] Iniciando: {self.cfg.cmd} em {cwd}")
@@ -56,9 +47,13 @@ class ProcessManager:
         self._exec_logger = ExecutionLogger(self.cfg.name)
         self._peak_ram_mb = 0.0
 
+        # Usar subprocess_shell no Windows — o cmd.exe resolve PATH, aspas
+        # e built-ins corretamente (cscript, powershell, etc.).
+        # create_subprocess_exec dá [WinError 5] Access Denied pra cmds
+        # com aspas literais ou sem caminho absoluto.
         try:
-            self._process = await asyncio.create_subprocess_exec(
-                *parts,
+            self._process = await asyncio.create_subprocess_shell(
+                self.cfg.cmd,
                 cwd=str(cwd),
                 env=env,
                 stdout=asyncio.subprocess.PIPE,
