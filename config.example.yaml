@@ -1,0 +1,57 @@
+# ═══════════════════════════════════════════════════════════════
+# HIDRA CONTROL PLANE — Template de configuração
+# ═══════════════════════════════════════════════════════════════
+#
+# Este arquivo é o TEMPLATE versionado no git.
+# Ao subir o app pela primeira vez em uma máquina nova, o Control
+# Panel cria `config.yaml` copiando este arquivo (se `config.yaml`
+# não existir).
+#
+# Para cadastrar apps em produção/VM, use a interface web em
+# http://localhost:9000 → aba "Configurar". Não edite manualmente
+# a menos que precise.
+#
+# Slots:
+#   heavy  → Semaphore(1) — máximo 1 job pesado por vez
+#   light  → Semaphore(3) — até 3 jobs leves em paralelo
+#   always → Serviço permanente com auto-restart
+#
+# Schedules:
+#   "manual" → roda uma vez ao ativar (botão ▶)
+#   "loop"   → roda, aguarda pause_between segundos, repete
+#
+# Apps cadastrados via "🐍 Cadastrar app Python" no dashboard são
+# marcados com _source: python e têm campos:
+#   cmd: caminho absoluto do pythonw/python.exe do .venv + script
+#   cwd: raiz do projeto
+#   env_file: caminho do .env (opcional, carregado no subprocess)
+#   gui: true → usa CREATE_BREAKAWAY_FROM_JOB (janela aparece)
+#
+# Apps da pasta apps_executaveis/ são marcados com _source: pasta.
+# ═══════════════════════════════════════════════════════════════
+
+# Começa vazio — cadastre apps pela UI ou cole um exemplo aqui.
+apps: {}
+
+# ── Alertas Telegram ────────────────────────────────────────────
+# Os valores ${...} são resolvidos a partir do .env local.
+# Crie um .env na raiz do control_panel com:
+#   TELEGRAM_BOT_TOKEN=seu_token_aqui
+#   TELEGRAM_CHAT_ID=seu_chat_id_aqui
+alerts:
+  telegram_bot_token: "${TELEGRAM_BOT_TOKEN}"
+  telegram_chat_id: "${TELEGRAM_CHAT_ID}"
+  on_failure: true
+  on_timeout: true
+  on_ram_exceeded: true
+
+# ── Configurações gerais ────────────────────────────────────────
+settings:
+  log_dir: "logs/"
+  log_rotation: "10 MB"
+  log_retention: 30
+  heavy_slots: 1              # jobs pesados simultâneos (CPU/RAM alto)
+  light_slots: 3              # jobs leves simultâneos
+  ram_safety_margin_mb: 512   # RAM reservada ao SO — antes de iniciar
+                              # um app, orchestrator verifica se
+                              # available - margin >= max_ram_mb dele

@@ -67,10 +67,30 @@ def start_dashboard() -> subprocess.Popen | None:
         return None
 
 
+def _ensure_config_exists(config_path: Path) -> None:
+    """No primeiro boot (VM, clone novo), cria config.yaml a partir do template.
+
+    O config.yaml é ignorado pelo git (cada máquina tem o seu).
+    O config.example.yaml é versionado e serve de base.
+    """
+    if config_path.exists():
+        return
+    example = config_path.parent / "config.example.yaml"
+    if example.exists():
+        config_path.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+        logger.info(f"config.yaml não existia — copiado de config.example.yaml")
+    else:
+        logger.warning(
+            "config.yaml e config.example.yaml não existem — o orchestrator "
+            "subirá com apps vazios"
+        )
+
+
 async def run() -> None:
     load_dotenv(ROOT / ".env")
 
     config_path = ROOT / "config.yaml"
+    _ensure_config_exists(config_path)
     config = load_config(config_path)
     setup_logging(config.log_dir, config.log_rotation, config.log_retention)
 
