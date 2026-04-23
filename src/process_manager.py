@@ -158,6 +158,90 @@ class ProcessManager:
                 f"~{freed:.0f} MB liberados (RAM livre: {ram_after / 1024:.2f} GB)"
             )
 
+    def _measure_tree_ram(self) -> float:
+        """Soma a RAM de TODOS os processos do Job Object (árvore inteira)."""
+        if not self._job or not self._job.available:
+            return 0.0
+        import psutil
+        total = 0.0
+        for pid in self._job._assigned_pids:
+            try:
+                p = psutil.Process(pid)
+                if p.is_running():
+                    total += p.memory_info().rss / (1024 * 1024)
+                for c in p.children(recursive=True):
+                    try:
+                        if c.is_running():
+                            total += c.memory_info().rss / (1024 * 1024)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        return total
+
+    async def _wait_for_descendants(
+        self, start_time: float, timeout: int, max_ram: int, original_pid: int
+    ) -> None:
+        """Aguarda descendentes no Job Object terminarem.
+
+        Suporta padrão 'launcher' — VBS/BAT que lança um processo filho
+        (ex: pythonw.exe) e termina logo após. Sem isso, o Job Object
+        mataria o filho junto com o launcher.
+
+        Sai quando:
+          - Todos os processos do job terminaram, OU
+          - Estado foi marcado como disabled (usuário clicou em stop), OU
+          - Timeout total excedido, OU
+          - RAM da árvore excedida
+        """
+        if not self._job or not self._job.available:
+            return
+
+        alive = self._job.count_alive()
+        if alive <= 0:
+            return  # nada a esperar
+
+        logger.info(
+            f"[{self.cfg.name}] Processo principal (PID {original_pid}) terminou, "
+            f"mas {alive} descendente(s) ainda rodando — aguardando finalizarem..."
+        )
+        # Restaura status "running" (os descendentes ainda estão ativos)
+        self.state.status = "running"
+
+        while self._job and self._job.available:
+            alive = self._job.count_alive()
+            if alive <= 0:
+                break
+
+            if not self.state.enabled:
+                logger.info(f"[{self.cfg.name}] Parada solicitada — encerrando descendentes")
+                break
+
+            elapsed = time.time() - start_time
+            if elapsed > timeout:
+                logger.warning(
+                    f"[{self.cfg.name}] Timeout total ({timeout}s) — matando descendentes"
+                )
+                self.state.status = "timeout"
+                self.state.last_error = f"Timeout total após {elapsed:.0f}s"
+                break
+
+            # Monitorar RAM da árvore toda
+            tree_ram = self._measure_tree_ram()
+            self.state.ram_mb = tree_ram
+            if tree_ram > self._peak_ram_mb:
+                self._peak_ram_mb = tree_ram
+            if tree_ram > max_ram:
+                logger.warning(
+                    f"[{self.cfg.name}] RAM da árvore excedida: "
+                    f"{tree_ram:.0f}MB > {max_ram}MB — matando"
+                )
+                self.state.status = "failed"
+                self.state.last_error = f"RAM excedida (árvore): {tree_ram:.0f}MB"
+                break
+
+            await asyncio.sleep(3)
+
     async def wait_with_monitoring(self) -> int:
         """Aguarda o processo terminar, monitorando RAM e timeout."""
         if self._process is None:
@@ -230,6 +314,11 @@ class ProcessManager:
 
         except Exception as e:
             logger.error(f"[{self.cfg.name}] Erro no monitoramento: {e}")
+
+        # ── Fase 2: Processo principal terminou, mas pode ser um LAUNCHER
+        # (ex: VBS que lança pythonw.exe e sai). Aguardar os descendentes
+        # no Job Object até todos terminarem, respeitando timeout/RAM/stop.
+        await self._wait_for_descendants(start_time, timeout, max_ram, pid)
 
         # Coletar resultado
         exit_code = self._process.returncode or 0
