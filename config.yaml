@@ -25,19 +25,34 @@
 # ═══════════════════════════════════════════════════════════════
 
 apps:
-  exemplo_hello:
+  monitor_visivel:
     slot: light
     cwd: C:/Users/marcelo.lsantos_bhub/Documents/automacoes/control_panel/apps_executaveis
-    cmd: cscript //nologo //B "C:\Users\marcelo.lsantos_bhub\Documents\automacoes\control_panel\apps_executaveis\exemplo_hello.vbs"
+    cmd: cscript //nologo "C:\Users\marcelo.lsantos_bhub\Documents\automacoes\control_panel\apps_executaveis\monitor_visivel.vbs"
     schedule: manual
     max_ram_mb: 512
     timeout: 600
     _source: pasta
-  monitor_contribuintes:
+  teste_1_hello:
     slot: light
-    cwd: C:/Users/marcelo.lsantos_bhub/Documents/automacoes/cadastro_contribuinte
-    cmd: cscript //nologo //B "C:\Users\marcelo.lsantos_bhub\Documents\automacoes\cadastro_contribuinte\deploy\iniciar_silencioso.vbs"
-      //nologo
+    cwd: C:/Users/marcelo.lsantos_bhub/Documents/automacoes/control_panel/apps_executaveis
+    cmd: cscript //nologo "C:\Users\marcelo.lsantos_bhub\Documents\automacoes\control_panel\apps_executaveis\teste_1_hello.vbs"
+    schedule: manual
+    max_ram_mb: 512
+    timeout: 600
+    _source: pasta
+  teste_2_abrir_notepad:
+    slot: light
+    cwd: C:/Users/marcelo.lsantos_bhub/Documents/automacoes/control_panel/apps_executaveis
+    cmd: cscript //nologo "C:\Users\marcelo.lsantos_bhub\Documents\automacoes\control_panel\apps_executaveis\teste_2_abrir_notepad.vbs"
+    schedule: manual
+    max_ram_mb: 512
+    timeout: 600
+    _source: pasta
+  teste_3_processamento:
+    slot: light
+    cwd: C:/Users/marcelo.lsantos_bhub/Documents/automacoes/control_panel/apps_executaveis
+    cmd: cscript //nologo "C:\Users\marcelo.lsantos_bhub\Documents\automacoes\control_panel\apps_executaveis\teste_3_processamento.vbs"
     schedule: manual
     max_ram_mb: 512
     timeout: 600

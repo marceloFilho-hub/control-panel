@@ -155,8 +155,9 @@ def build_command(path_str: str, arguments: str = "") -> tuple[str, str]:
             cmd = f"{cmd} {args}"
 
     elif info.kind == "vbs":
-        # //nologo suprime banner; //B = batch mode (sem prompts/erros em GUI)
-        cmd = f'cscript //nologo //B "{info.path}"'
+        # //nologo suprime banner. NÃO usar //B — ele silencia WScript.Echo
+        # mesmo com pipe, então o log "Ao vivo" ficaria vazio.
+        cmd = f'cscript //nologo "{info.path}"'
         if args:
             cmd = f"{cmd} {args}"
 
