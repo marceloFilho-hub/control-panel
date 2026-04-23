@@ -166,34 +166,59 @@ def render_app_table(state: ControlPlaneState) -> None:
 
 
 def _render_app_row(name: str, app: AppState) -> None:
+    """Renderiza uma linha da tabela de apps com DOM estável e resistente
+    a tradução automática do navegador."""
     icon = STATUS_ICONS.get(app.status, "?")
     color = STATUS_COLORS.get(app.status, TEXT_MUTED)
 
+    # Sempre o MESMO valor pra célula Hora: pega o timestamp mais recente
+    # (evita condicional que troca DOM e causa NotFoundError: removeChild)
+    ts = app.started_at if app.status == "running" else app.finished_at
+    hora = format_time(ts)
+    ram = f"{app.ram_mb:.0f} MB" if app.ram_mb > 0 else "—"
+    cpu = f"{app.cpu_pct:.0f}%" if app.cpu_pct > 0 else "—"
+    next_run = app.next_run or "—"
+    enabled_dot = (
+        f"<span style='color:{SUCCESS}'>●</span>"
+        if app.enabled
+        else f"<span style='color:{TEXT_MUTED}'>○</span>"
+    )
+
     cols = st.columns([2.5, 1.2, 0.8, 0.8, 1.2, 1.2, 2.3])
 
+    # Todas as células usam markdown com translate="no" para evitar que
+    # o tradutor do navegador mude conteúdo e confunda o React
     with cols[0]:
-        enabled_dot = (
-            f"<span style='color:{SUCCESS}'>●</span>"
-            if app.enabled
-            else f"<span style='color:{TEXT_MUTED}'>○</span>"
-        )
         st.markdown(
-            f"{enabled_dot} <span style='color:{color};font-size:1.1em'>{icon}</span> **{name}**",
+            f'{enabled_dot} <span style="color:{color};font-size:1.1em">{icon}</span> '
+            f'<strong translate="no">{name}</strong>',
             unsafe_allow_html=True,
         )
     with cols[1]:
-        st.caption(app.status.upper())
+        st.markdown(
+            f'<span class="notranslate" translate="no" style="color:{TEXT_MUTED};font-size:0.85em">{app.status.upper()}</span>',
+            unsafe_allow_html=True,
+        )
     with cols[2]:
-        st.caption(f"{app.ram_mb:.0f} MB" if app.ram_mb > 0 else "—")
+        st.markdown(
+            f'<span translate="no" style="color:{TEXT_MUTED};font-size:0.85em">{ram}</span>',
+            unsafe_allow_html=True,
+        )
     with cols[3]:
-        st.caption(f"{app.cpu_pct:.0f}%" if app.cpu_pct > 0 else "—")
+        st.markdown(
+            f'<span translate="no" style="color:{TEXT_MUTED};font-size:0.85em">{cpu}</span>',
+            unsafe_allow_html=True,
+        )
     with cols[4]:
-        if app.status == "running":
-            st.caption(format_time(app.started_at))
-        else:
-            st.caption(format_time(app.finished_at))
+        st.markdown(
+            f'<span translate="no" style="color:{TEXT_MUTED};font-size:0.85em">{hora}</span>',
+            unsafe_allow_html=True,
+        )
     with cols[5]:
-        st.caption(app.next_run or "—")
+        st.markdown(
+            f'<span translate="no" style="color:{TEXT_MUTED};font-size:0.85em">{next_run}</span>',
+            unsafe_allow_html=True,
+        )
     with cols[6]:
         _render_app_controls(name, app)
 
@@ -229,7 +254,7 @@ def _render_app_controls(name: str, app: AppState) -> None:
 # ═══════════════════════════════════════════════════════════════
 
 def render_queue_view(state: ControlPlaneState) -> None:
-    st.markdown("### \U0001f4cb Filas de execução")
+    st.markdown("### Filas de execução")
 
     # Banner de RAM disponível
     available_gb = state.available_ram_mb / 1024
@@ -240,26 +265,40 @@ def render_queue_view(state: ControlPlaneState) -> None:
         f"(**{usable_mb:.0f} MB utilizáveis** após margem de {safety_mb} MB para o SO)"
     )
 
-    # Filas de slot
+    # Filas por slot
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown(f"**Slot Heavy** ({state.heavy_slots_used}/{state.heavy_slots_max} em uso)")
+        st.markdown(
+            f'<strong translate="no">Slot Heavy</strong> '
+            f'({state.heavy_slots_used}/{state.heavy_slots_max} em uso)',
+            unsafe_allow_html=True,
+        )
         if not state.heavy_queue:
-            st.info("Fila vazia")
+            st.info("Nenhum app aguardando")
         else:
             for pos, app_name in enumerate(state.heavy_queue, 1):
-                st.markdown(f"`{pos}.` **{app_name}** ⏳ aguardando slot")
+                st.markdown(
+                    f'`{pos}.` <strong translate="no">{app_name}</strong> — aguardando vaga',
+                    unsafe_allow_html=True,
+                )
     with col2:
-        st.markdown(f"**Slot Light** ({state.light_slots_used}/{state.light_slots_max} em uso)")
+        st.markdown(
+            f'<strong translate="no">Slot Light</strong> '
+            f'({state.light_slots_used}/{state.light_slots_max} em uso)',
+            unsafe_allow_html=True,
+        )
         if not state.light_queue:
-            st.info("Fila vazia")
+            st.info("Nenhum app aguardando")
         else:
             for pos, app_name in enumerate(state.light_queue, 1):
-                st.markdown(f"`{pos}.` **{app_name}** ⏳ aguardando slot")
+                st.markdown(
+                    f'`{pos}.` <strong translate="no">{app_name}</strong> — aguardando vaga',
+                    unsafe_allow_html=True,
+                )
 
     # Fila de memória
     st.divider()
-    st.markdown("### \U0001f9e0 Fila de memória")
+    st.markdown("### Apps aguardando memória")
     st.caption(
         "Apps que já conquistaram o slot mas estão aguardando memória suficiente "
         "para iniciar com segurança."
@@ -271,22 +310,23 @@ def render_queue_view(state: ControlPlaneState) -> None:
             app = state.apps.get(app_name)
             next_info = f" — {app.next_run}" if app and app.next_run else ""
             st.markdown(
-                f"<span style='color:{WARNING}'>⏳</span> "
-                f"`{pos}.` **{app_name}**{next_info}",
+                f'<span style="color:{WARNING}">⏳</span> '
+                f'`{pos}.` <strong translate="no">{app_name}</strong>{next_info}',
                 unsafe_allow_html=True,
             )
 
     st.divider()
-    st.markdown("### \U0001f3ac Apps rodando agora")
+    st.markdown("### Apps rodando agora")
     running = [a for a in state.apps.values() if a.status == "running"]
     if not running:
         st.info("Nenhum app em execução")
     else:
         for app in running:
             st.markdown(
-                f"<span style='color:{SUCCESS}'>●</span> **{app.name}** "
-                f"— PID {app.pid} — {app.ram_mb:.0f} MB — "
-                f"iniciado {format_time(app.started_at)}",
+                f'<span style="color:{SUCCESS}">●</span> '
+                f'<strong translate="no">{app.name}</strong> '
+                f'— PID {app.pid} — {app.ram_mb:.0f} MB — '
+                f'iniciado {format_time(app.started_at)}',
                 unsafe_allow_html=True,
             )
 
@@ -632,19 +672,29 @@ def main() -> None:
         initial_sidebar_state="collapsed",
     )
 
-    # Desabilitar tradutor do navegador (evita RAM → "bater" etc.)
+    # Desabilitar tradutor do navegador de forma agressiva
+    # (Chrome estava traduzindo RAM→bater, memória→membrana, slot→tensão)
     st.markdown(
         """
         <meta name="google" content="notranslate">
         <meta http-equiv="Content-Language" content="pt-BR">
+        <script>
+        // Marca body + html com notranslate logo ao carregar
+        document.documentElement.setAttribute('translate', 'no');
+        document.documentElement.classList.add('notranslate');
+        if (document.body) {
+            document.body.setAttribute('translate', 'no');
+            document.body.classList.add('notranslate');
+        }
+        </script>
         """,
         unsafe_allow_html=True,
     )
     # CSS mínimo — o tema light já vem do .streamlit/config.toml
     st.markdown(f"""
     <style>
-        html {{ translate: no; }}
-        .notranslate {{ translate: no; }}
+        html, body {{ translate: no !important; }}
+        .notranslate {{ translate: no !important; }}
         div[data-testid="column"] button {{
             padding: 0.2rem 0.5rem;
             min-height: 0;
