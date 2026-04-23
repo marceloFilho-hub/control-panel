@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 
 from app_discovery import APPS_DIR, scan_apps_dir
 from config_writer import read_config_raw, upsert_app
@@ -200,26 +199,29 @@ def _render_app_row(name: str, app: AppState) -> None:
 
 
 def _render_app_controls(name: str, app: AppState) -> None:
+    """Renderiza os 3 botões SEMPRE (apenas disabled se não aplicável)
+    para manter a árvore DOM estável e evitar NotFoundError do React."""
     btn_cols = st.columns(3)
     is_running = app.status in ("running", "queued")
     is_paused = app.status == "paused"
     is_enabled = app.enabled
 
+    can_start = (not is_enabled) or is_paused
+    can_pause = is_enabled and not is_paused
+    can_stop = is_enabled or is_running
+
     with btn_cols[0]:
-        if not is_enabled or is_paused:
-            if st.button("▶", key=f"start_{name}", help="Iniciar"):
-                send_command("start", name)
-                st.rerun()
+        if st.button("▶", key=f"start_{name}", help="Iniciar", disabled=not can_start):
+            send_command("start", name)
+            st.rerun()
     with btn_cols[1]:
-        if is_enabled and not is_paused:
-            if st.button("⏸", key=f"pause_{name}", help="Pausar"):
-                send_command("pause", name)
-                st.rerun()
+        if st.button("⏸", key=f"pause_{name}", help="Pausar", disabled=not can_pause):
+            send_command("pause", name)
+            st.rerun()
     with btn_cols[2]:
-        if is_enabled or is_running:
-            if st.button("■", key=f"stop_{name}", help="Parar"):
-                send_command("stop", name)
-                st.rerun()
+        if st.button("■", key=f"stop_{name}", help="Parar", disabled=not can_stop):
+            send_command("stop", name)
+            st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -653,8 +655,6 @@ def main() -> None:
 
     st.title("\U0001f40d Hidra Control Plane")
 
-    state = load_state()
-
     tabs = st.tabs([
         "\U0001f4ca Status",
         "\U0001f4fa Ao vivo",
@@ -664,35 +664,55 @@ def main() -> None:
     ])
 
     with tabs[0]:
-        if not state.apps:
-            st.warning("Orquestrador não iniciado ou sem apps configurados.")
-        else:
-            render_kpi_row(state)
-            st.divider()
-            render_global_controls(state)
-            st.divider()
-            render_slots(state)
-            st.divider()
-            render_app_table(state)
+        _status_fragment()
 
     with tabs[1]:
-        render_live_view(state)
+        _live_fragment()
 
     with tabs[2]:
-        if not state.apps:
-            st.warning("Orquestrador não iniciado.")
-        else:
-            render_queue_view(state)
+        _queue_fragment()
 
     with tabs[3]:
-        render_config_tab(state)
+        # Configurar é estático — sem auto-refresh (o usuário clica em Salvar)
+        render_config_tab(load_state())
 
     with tabs[4]:
-        render_history_rich(state)
+        # Histórico é estático — o usuário usa dropdowns para drill-down
+        render_history_rich(load_state())
 
-    # Auto-refresh gerenciado pelo componente oficial (sem conflito com DOM
-    # do React durante interações em widgets). 10s é suave e não dá race.
-    st_autorefresh(interval=10000, key="main_refresh")
+
+@st.fragment(run_every=3)
+def _status_fragment() -> None:
+    """Fragment isolado para a aba Status — re-renderiza a cada 3s sem
+    afetar o resto da página (evita NotFoundError no DOM)."""
+    state = load_state()
+    if not state.apps:
+        st.warning("Orquestrador não iniciado ou sem apps configurados.")
+        return
+    render_kpi_row(state)
+    st.divider()
+    render_global_controls(state)
+    st.divider()
+    render_slots(state)
+    st.divider()
+    render_app_table(state)
+
+
+@st.fragment(run_every=3)
+def _queue_fragment() -> None:
+    """Fragment isolado para a aba Fila — re-renderiza a cada 3s."""
+    state = load_state()
+    if not state.apps:
+        st.warning("Orquestrador não iniciado.")
+        return
+    render_queue_view(state)
+
+
+@st.fragment(run_every=5)
+def _live_fragment() -> None:
+    """Fragment isolado para a aba Ao vivo — re-renderiza a cada 5s
+    (o log é mais caro de ler, então frequência menor)."""
+    render_live_view(load_state())
 
 
 if __name__ == "__main__":
