@@ -47,17 +47,31 @@ class ProcessManager:
         self._exec_logger = ExecutionLogger(self.cfg.name)
         self._peak_ram_mb = 0.0
 
+        # Flags de criação do processo — apps GUI precisam escapar do Job
+        # Object e herdar o desktop interativo do usuário. Sem isso, janelas
+        # Tkinter/PyQt não aparecem (ficam no WindowStation errado).
+        import subprocess as _sp
+        creationflags = 0
+        if self.cfg.gui:
+            # CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+            # CREATE_NEW_PROCESS_GROUP = 0x00000200
+            # DETACHED_PROCESS = 0x00000008
+            creationflags = 0x01000000 | 0x00000200 | 0x00000008
+            logger.info(f"[{self.cfg.name}] Modo GUI: breakaway from job + detached")
+
         # Usar subprocess_shell no Windows — o cmd.exe resolve PATH, aspas
         # e built-ins corretamente (cscript, powershell, etc.).
-        # create_subprocess_exec dá [WinError 5] Access Denied pra cmds
-        # com aspas literais ou sem caminho absoluto.
         try:
+            kwargs = {
+                "cwd": str(cwd),
+                "env": env,
+                "stdout": asyncio.subprocess.PIPE,
+                "stderr": asyncio.subprocess.PIPE,
+            }
+            if creationflags:
+                kwargs["creationflags"] = creationflags
             self._process = await asyncio.create_subprocess_shell(
-                self.cfg.cmd,
-                cwd=str(cwd),
-                env=env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                self.cfg.cmd, **kwargs
             )
         except Exception as e:
             logger.error(f"[{self.cfg.name}] Falha ao iniciar: {e}")
@@ -76,14 +90,20 @@ class ProcessManager:
         self._cleanup_done = False
 
         # Associar ao Windows Job Object ASAP para capturar futuros filhos.
-        # Isso garante que netos/bisnetos spawnados pelo processo também
-        # morrerão quando o job for fechado (cleanup garantido).
-        self._job = JobObject(name=self.cfg.name)
-        if self._job.available:
-            if self._job.assign(self._process.pid):
-                logger.debug(f"[{self.cfg.name}] PID {self._process.pid} associado ao Job Object")
-            else:
-                logger.warning(f"[{self.cfg.name}] Falha ao associar ao Job Object — kill_tree será usado como fallback")
+        # Exceto para apps GUI — esses precisam escapar do job pra herdar
+        # o desktop interativo do usuário (senão janelas ficam invisíveis).
+        if self.cfg.gui:
+            logger.info(
+                f"[{self.cfg.name}] GUI app — sem Job Object, cleanup por kill_tree"
+            )
+            self._job = None
+        else:
+            self._job = JobObject(name=self.cfg.name)
+            if self._job.available:
+                if self._job.assign(self._process.pid):
+                    logger.debug(f"[{self.cfg.name}] PID {self._process.pid} associado ao Job Object")
+                else:
+                    logger.warning(f"[{self.cfg.name}] Falha ao associar ao Job Object — kill_tree será usado como fallback")
 
         # Stream stdout/stderr para o arquivo de log em tempo real
         asyncio.create_task(self._stream_output(self._process.stdout, b"[out] "))

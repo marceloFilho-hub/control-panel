@@ -476,6 +476,20 @@ def _render_pasta_row(app, existing: dict, state: ControlPlaneState) -> None:
                 use_container_width=True,
             )
 
+        # Checkbox GUI — força o app a escapar do Job Object para que
+        # a janela (Tkinter/PyQt/etc.) apareça no desktop do usuário.
+        gui_value = st.checkbox(
+            "\U0001f4fa Interface gráfica (GUI) — marque se o app abre janela visível",
+            value=existing.get("gui", False),
+            key=f"gui_{app.name}",
+            help=(
+                "Quando marcado, o app é lançado com flags CREATE_BREAKAWAY_FROM_JOB "
+                "+ DETACHED_PROCESS para herdar o desktop interativo do usuário. "
+                "Sem isso, janelas GUI ficam invisíveis quando o app é lançado "
+                "pelo orquestrador."
+            ),
+        )
+
         if save_clicked:
             cmd, cwd = build_command(str(app.file_path))
             app_data = {
@@ -493,6 +507,8 @@ def _render_pasta_row(app, existing: dict, state: ControlPlaneState) -> None:
                 app_data["auto_start"] = True
             if existing.get("restart_on_crash"):
                 app_data["restart_on_crash"] = True
+            if gui_value:
+                app_data["gui"] = True
 
             upsert_app(CONFIG_PATH, app.name, app_data)
             st.success(

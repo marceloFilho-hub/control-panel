@@ -24,6 +24,7 @@ class AppConfig:
     priority: int = 5
     restart_on_crash: bool = False
     auto_start: bool = False  # se True, inicia automaticamente ao subir o orchestrator
+    gui: bool = False  # se True, app lança janela GUI — usa CREATE_BREAKAWAY_FROM_JOB
     env: dict[str, str] = field(default_factory=dict)
 
 
@@ -98,6 +99,7 @@ def load_config(config_path: str | Path = "config.yaml") -> ControlPlaneConfig:
             priority=app_data.get("priority", 5),
             restart_on_crash=app_data.get("restart_on_crash", False),
             auto_start=app_data.get("auto_start", False),
+            gui=app_data.get("gui", False),
             env=app_data.get("env", {}),
         )
 
