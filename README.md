@@ -211,21 +211,50 @@ complexidade de migração.
 - Python 3.13 (recomendo o oficial — não use o MS Store sem testar)
 - 4+ GB RAM livre (16 GB é o sweet spot)
 
-### Instalação
+### Instalação assistida (recomendado)
+
+Depois de clonar o repositório, rode o instalador:
 
 ```bash
 git clone https://github.com/marceloFilho-hub/control-panel.git
 cd control-panel
+scripts\install.bat
+```
+
+O script faz **tudo em 4 passos automatizados**:
+
+1. Valida que o Python 3.13+ está instalado
+2. Cria `.venv` na raiz do projeto
+3. Instala dependências via `pip install -e .`
+4. Cria um atalho **"Hidra Control Plane"** na Área de Trabalho
+
+Ao final, oferece iniciar o painel imediatamente. A partir daí basta
+**duplo-clique no atalho do desktop** — o `iniciar_painel.vbs`:
+
+- Sobe o `python -m src.main` sem janela de console (SW_HIDE)
+- Faz polling de `http://localhost:9000` até o dashboard responder
+- Abre o navegador padrão direto na URL
+- Se o painel já estiver rodando, apenas abre o browser (idempotente)
+
+### Instalação manual (alternativa)
+
+```bash
 python -m venv .venv
 .venv\Scripts\activate
 pip install -e .
-```
-
-### Primeira execução
-
-```bash
 python -m src.main
 ```
+
+### Desinstalação
+
+```bash
+scripts\desinstalar.bat
+```
+
+Remove o atalho da Área de Trabalho e mata o processo na porta 9000.
+**Não apaga** código, config ou logs.
+
+### Primeira execução
 
 O `_ensure_config_exists` copia `config.example.yaml` → `config.yaml` se
 não existir. Acesse o dashboard em **http://localhost:9000**.
