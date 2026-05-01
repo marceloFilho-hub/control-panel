@@ -27,6 +27,19 @@ class AppConfig:
     gui: bool = False  # se True, app lança janela GUI — usa CREATE_BREAKAWAY_FROM_JOB
     env_file: str = ""  # caminho do .env a carregar antes de executar (opcional)
     env: dict[str, str] = field(default_factory=dict)
+    # ── Pre-start hooks ─────────────────────────────────────
+    # git_pull: se True, executa `git pull --ff-only` no cwd antes de cada
+    # rodada (best-effort — falha não bloqueia execução do app).
+    git_pull: bool = False
+    # pre_start: lista de comandos shell executados sequencialmente no cwd
+    # antes do app principal. Suporta substituição de {python} e {pip} pelo
+    # executável do venv detectado em cwd/.venv/Scripts.
+    pre_start: list[str] = field(default_factory=list)
+    # Timeout TOTAL (segundos) somando git_pull + todos os pre_start
+    pre_start_timeout: int = 300
+    # Se True, falha em qualquer comando do pre_start aborta a execução do
+    # app. Se False, apenas loga e segue. git_pull sempre é best-effort.
+    pre_start_required: bool = True
 
 
 @dataclass
@@ -103,6 +116,10 @@ def load_config(config_path: str | Path = "config.yaml") -> ControlPlaneConfig:
             gui=app_data.get("gui", False),
             env_file=app_data.get("env_file", ""),
             env=app_data.get("env", {}),
+            git_pull=app_data.get("git_pull", False),
+            pre_start=list(app_data.get("pre_start") or []),
+            pre_start_timeout=app_data.get("pre_start_timeout", 300),
+            pre_start_required=app_data.get("pre_start_required", True),
         )
 
     alerts_data = raw.get("alerts", {})

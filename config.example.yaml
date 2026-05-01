@@ -28,6 +28,18 @@
 #   gui: true → usa CREATE_BREAKAWAY_FROM_JOB (janela aparece)
 #
 # Apps da pasta apps_executaveis/ são marcados com _source: pasta.
+#
+# ── Hooks pré-execução (opcionais por app) ─────────────────────
+#   git_pull: true             # roda `git pull --ff-only` no cwd antes de
+#                              # cada rodada (best-effort: falha não bloqueia)
+#   pre_start:                 # comandos shell sequenciais antes do app
+#     - "{python} -m pip install -r requirements.txt"
+#     - "{python} scripts/migrate.py"
+#                              # {python}/{pip} são substituídos pelo
+#                              # executável do .venv detectado em cwd
+#   pre_start_timeout: 300     # segundos — total para git_pull + pre_start
+#   pre_start_required: true   # se false, falha do pre_start apenas loga
+#                              # (default true: aborta a execução)
 # ═══════════════════════════════════════════════════════════════
 
 # Começa vazio — cadastre apps pela UI ou cole um exemplo aqui.
