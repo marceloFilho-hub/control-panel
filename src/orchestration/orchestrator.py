@@ -237,7 +237,9 @@ class Orchestrator:
 
             if cfg.restart_on_crash:
                 logger.warning(f"[{app_name}] Serviço morreu, reiniciando em 5s...")
-                await self.alerter.alert_crash_restart(app_name)
+                await self.alerter.alert_crash_restart(
+                    app_name, run_id=getattr(manager, "_run_id", None)
+                )
                 await asyncio.sleep(5)
             else:
                 app_state.status = "off"

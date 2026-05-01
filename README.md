@@ -512,6 +512,37 @@ Disparados automaticamente (se `.env` configurado):
 - 🔺 App excedeu `max_ram_mb`
 - 💥 Serviço `always` crashou e foi reiniciado
 
+### Integração com `telemonit`
+
+O `TelegramAlerter` é um wrapper async sobre a lib externa
+[`telemonit`](https://github.com/marceloFilho-hub/telemonit) — toda a
+notificação real (Telegram + JSONL no Drive) acontece lá. Vantagens:
+
+- **Audit trail automático**: cada falha/timeout/RAM/restart vira uma linha
+  JSONL em `eventos_control_panel_<YYYY-MM>.jsonl` na pasta de logs do Drive,
+  com `run_id` correlacionável aos arquivos `.log` locais.
+- **`run_id` por execução**: gerado no `ProcessManager.start()` no formato
+  `<app>-<YYYYmmdd-HHMMSS>` e propagado a todos os alertas; aparece no
+  cabeçalho da mensagem do Telegram e como campo first-class no evento JSONL.
+- **Throttle de storm protection** já vem da `telemonit` (alerta repetido
+  da mesma run em <5min é engolido).
+- **Resolução `drive:<file_id>`** para credenciais: zero secrets em git.
+
+#### Variáveis de ambiente esperadas (lidas pela `telemonit`)
+
+```ini
+MONITOR_PROJETO=control_panel             # opcional — default: control_panel
+MONITOR_TG_TOKEN=drive:<file_id>          # ou token cru
+MONITOR_TG_CHAT_ID=drive:<file_id>        # ou chat_id cru
+MONITOR_DRIVE_LOG_FOLDER=<id_da_pasta>
+MONITOR_NIVEL=alerta                      # info | alerta | erro
+GOOGLE_APPLICATION_CREDENTIALS=credentials/sa.json
+```
+
+> Se o `config.yaml` tiver `alerts.telegram_bot_token` / `telegram_chat_id`
+> preenchidos, eles têm precedência sobre as env vars (passados via
+> `telemonit.configurar` no `__init__` do alerter).
+
 ---
 
 ## API interna (comandos)

@@ -22,3 +22,7 @@ streamlit-autorefresh>=1.0.0
 
 # Windows-only (Job Objects + .lnk resolver)
 pywin32>=305; platform_system == 'Windows'
+
+# Notificações centralizadas (Telegram + JSONL no Drive + run tracking)
+# Repo privado pessoal — autenticação GitHub necessária na VM
+telemonit @ git+https://github.com/marceloFilho-hub/telemonit.git@main
