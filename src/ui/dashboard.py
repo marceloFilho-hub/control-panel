@@ -420,6 +420,11 @@ def _render_python_registration(state: ControlPlaneState) -> None:
             with c4:
                 gui_chk = st.checkbox("📺 GUI", help="Marcar se o app abre janela (Tkinter, PyQt...)")
 
+            git_pull_chk = st.checkbox(
+                "🔄 git pull --ff-only no cwd antes de cada execução",
+                help="Atualiza o repositório do app antes de rodar (best-effort: se falhar, segue com o código local).",
+            )
+
             submit = st.form_submit_button("➕ Cadastrar app", type="primary")
 
             if submit:
@@ -443,6 +448,8 @@ def _render_python_registration(state: ControlPlaneState) -> None:
                         app_data["env_file"] = str(project.env_file).replace("\\", "/")
                     if gui_chk:
                         app_data["gui"] = True
+                    if git_pull_chk:
+                        app_data["git_pull"] = True
 
                     upsert_app(CONFIG_PATH, app_name.strip(), app_data)
                     st.success(
@@ -539,6 +546,48 @@ def _render_python_app_row(name: str, data: dict, state: ControlPlaneState) -> N
         key=f"py_gui_{name}",
     )
 
+    # ── Hooks pré-execução ────────────────────────────────────
+    with st.expander("🪝 Hooks pré-execução (git pull + pre_start)", expanded=False):
+        st.caption(
+            "Executados antes de cada rodada do app. A saída é gravada no "
+            "log da execução com prefixos `[git]` e `[pre]`."
+        )
+        h1, h2 = st.columns([1, 1])
+        with h1:
+            git_pull_chk = st.checkbox(
+                "🔄 git pull --ff-only no cwd antes de cada execução",
+                value=data.get("git_pull", False),
+                key=f"py_gp_{name}",
+                help="Best-effort: se falhar, alerta no Telegram mas a execução continua com o código local.",
+            )
+        with h2:
+            pre_required_chk = st.checkbox(
+                "Abortar se hook do pre_start falhar",
+                value=data.get("pre_start_required", True),
+                key=f"py_psr_{name}",
+            )
+
+        existing_pre = data.get("pre_start") or []
+        if isinstance(existing_pre, str):
+            existing_pre = [existing_pre]
+        pre_start_text = st.text_area(
+            "Comandos pre_start (1 por linha)",
+            value="\n".join(existing_pre),
+            key=f"py_ps_{name}",
+            height=100,
+            placeholder='{python} -m pip install -r requirements.txt\n{python} scripts/migrate.py',
+            help="Suporta {python} e {pip} (resolvidos para .venv/Scripts/* do cwd).",
+        )
+
+        pre_timeout = st.number_input(
+            "Timeout total dos hooks (segundos)",
+            min_value=10, max_value=3600,
+            value=int(data.get("pre_start_timeout", 300)),
+            step=30,
+            key=f"py_pst_{name}",
+            help="Tempo máximo somando git_pull + todos os pre_start.",
+        )
+
     if save:
         updated = {**data, "slot": slot, "max_ram_mb": int(ram)}
         updated["schedule"] = "loop" if enabled_chk and slot != "always" else "manual"
@@ -554,6 +603,28 @@ def _render_python_app_row(name: str, data: dict, state: ControlPlaneState) -> N
             updated["gui"] = True
         else:
             updated.pop("gui", None)
+        # Hooks pré-execução
+        if git_pull_chk:
+            updated["git_pull"] = True
+        else:
+            updated.pop("git_pull", None)
+        pre_lines = [
+            line.strip()
+            for line in (pre_start_text or "").splitlines()
+            if line.strip()
+        ]
+        if pre_lines:
+            updated["pre_start"] = pre_lines
+            updated["pre_start_timeout"] = int(pre_timeout)
+            # pre_start_required é True por default — só persiste se for False
+            if not pre_required_chk:
+                updated["pre_start_required"] = False
+            else:
+                updated.pop("pre_start_required", None)
+        else:
+            updated.pop("pre_start", None)
+            updated.pop("pre_start_timeout", None)
+            updated.pop("pre_start_required", None)
         upsert_app(CONFIG_PATH, name, updated)
         st.success(f"✅ '{name}' atualizado — hot reload em até 5s")
         st.rerun()

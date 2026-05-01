@@ -418,6 +418,10 @@ class Orchestrator:
                 or old_cfg.pause_between != new_cfg.pause_between
                 or old_cfg.max_ram_mb != new_cfg.max_ram_mb
                 or old_cfg.timeout != new_cfg.timeout
+                or old_cfg.git_pull != new_cfg.git_pull
+                or old_cfg.pre_start != new_cfg.pre_start
+                or old_cfg.pre_start_timeout != new_cfg.pre_start_timeout
+                or old_cfg.pre_start_required != new_cfg.pre_start_required
             ):
                 changed.append(name)
 
