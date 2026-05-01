@@ -12,6 +12,10 @@ dependencies = [
     "streamlit-autorefresh>=1.0.0",
     "python-dotenv>=1.0.0",
     "pywin32>=305; platform_system=='Windows'",
+    # Notificações + audit trail centralizados (Telegram + JSONL no Drive).
+    # Repo privado pessoal — pip precisa estar autenticado no GitHub na VM
+    # (gh auth login ou PAT no .gitconfig).
+    "telemonit @ git+https://github.com/marceloFilho-hub/telemonit.git@main",
 ]
 
 [project.scripts]

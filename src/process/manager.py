@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 
 from loguru import logger
@@ -30,9 +31,21 @@ class ProcessManager:
         self._peak_ram_mb: float = 0.0
         self._job: JobObject | None = None
         self._cleanup_done: bool = False
+        # ID único da execução corrente — gerado no `start()` e usado em
+        # todos os alertas para correlacionar evento de Telegram, linha do
+        # JSONL no Drive e log local desta run.
+        self._run_id: str | None = None
+
+    def _gerar_run_id(self) -> str:
+        """Identificador único legível: <app>-<YYYYmmdd-HHMMSS>."""
+        return f"{self.cfg.name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
     async def start(self) -> int | None:
         """Inicia o processo e retorna o PID."""
+        # Gera o run_id antes de qualquer ação para que falhas mesmo no setup
+        # já saiam com um identificador correlacionável.
+        self._run_id = self._gerar_run_id()
+
         cwd = Path(self.cfg.cwd)
         if not cwd.exists():
             logger.error(f"[{self.cfg.name}] Diretório não existe: {cwd}")
@@ -96,7 +109,9 @@ class ProcessManager:
             self.state.last_error = str(e)
             if self._exec_logger:
                 self._exec_logger.close(status="failed", exit_code=-1, error=str(e))
-            await self.alerter.alert_failure(self.cfg.name, -1, str(e))
+            await self.alerter.alert_failure(
+                self.cfg.name, -1, str(e), run_id=self._run_id
+            )
             return None
 
         self.state.pid = self._process.pid
@@ -312,7 +327,9 @@ class ProcessManager:
                             peak_ram_mb=self._peak_ram_mb,
                         )
                     self._finalize()
-                    await self.alerter.alert_timeout(self.cfg.name, timeout)
+                    await self.alerter.alert_timeout(
+                        self.cfg.name, timeout, run_id=self._run_id
+                    )
                     return -1
 
                 # Check RAM
@@ -340,7 +357,7 @@ class ProcessManager:
                         )
                     self._finalize()
                     await self.alerter.alert_ram(
-                        self.cfg.name, metrics.ram_mb, max_ram
+                        self.cfg.name, metrics.ram_mb, max_ram, run_id=self._run_id
                     )
                     return -1
 
@@ -398,7 +415,7 @@ class ProcessManager:
                     peak_ram_mb=self._peak_ram_mb,
                 )
             await self.alerter.alert_failure(
-                self.cfg.name, exit_code, err_snippet
+                self.cfg.name, exit_code, err_snippet, run_id=self._run_id
             )
 
         # SEMPRE finalizar — mesmo em sucesso o processo pode ter deixado
