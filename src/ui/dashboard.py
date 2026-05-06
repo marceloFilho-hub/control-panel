@@ -125,7 +125,7 @@ def render_global_controls(state: ControlPlaneState) -> None:
     any_enabled = any(a.enabled for a in state.apps.values())
     all_enabled = all(a.enabled for a in state.apps.values()) if state.apps else False
 
-    cols = st.columns([1, 1, 6])
+    cols = st.columns([1, 1, 1, 5])
     with cols[0]:
         if st.button("▶ Start All", type="primary", disabled=all_enabled, use_container_width=True):
             send_command("start_all")
@@ -134,6 +134,47 @@ def render_global_controls(state: ControlPlaneState) -> None:
         if st.button("■ Stop All", type="secondary", disabled=not any_enabled, use_container_width=True):
             send_command("stop_all")
             st.rerun()
+    with cols[2]:
+        if st.button(
+            "⏻ Derrubar",
+            type="secondary",
+            use_container_width=True,
+            help="Encerra o orquestrador completamente. Mata todos os apps e seus "
+                 "subprocessos. O config.yaml (caminhos, slots, RAM dos apps) é "
+                 "preservado para a próxima execução.",
+        ):
+            st.session_state["confirm_shutdown"] = True
+
+    if st.session_state.get("confirm_shutdown"):
+        st.warning(
+            "⏻ **Derrubar orquestrador?** Todos os apps e subprocessos serão "
+            "mortos. O dashboard ficará indisponível até reiniciar via "
+            "atalho do desktop / `python -m src.main`. **Configurações dos "
+            "apps no `config.yaml` são preservadas.**"
+        )
+        c1, c2, _ = st.columns([1, 1, 6])
+        with c1:
+            if st.button(
+                "✅ Confirmar shutdown",
+                key="shutdown_confirm",
+                type="primary",
+                use_container_width=True,
+            ):
+                send_command("shutdown")
+                st.session_state["confirm_shutdown"] = False
+                st.success(
+                    "✅ Comando enviado. O orquestrador encerra em até 5s. "
+                    "Esta página vai parar de atualizar."
+                )
+                st.stop()
+        with c2:
+            if st.button(
+                "Cancelar",
+                key="shutdown_cancel",
+                use_container_width=True,
+            ):
+                st.session_state["confirm_shutdown"] = False
+                st.rerun()
 
 
 def render_slots(state: ControlPlaneState) -> None:

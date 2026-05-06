@@ -1,0 +1,26 @@
+name: Deploy to VM Windows
+
+# Atualiza automaticamente o checkout do control_panel na VM Windows
+# (self-hosted runner) sempre que houver push em master. O orquestrador
+# detecta o novo código no próximo ciclo do _monitor_loop sem precisar
+# de restart — apps efêmeros sobem na versão nova naturalmente, e a UI
+# Streamlit faz hot-reload do dashboard.py.
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+
+    steps:
+      - name: Atualizar código
+        shell: powershell
+        run: |
+          $repo = "C:\Users\Rotinas\Documents\Projetos\control_panel"
+          git config --system --add safe.directory ($repo -replace '\\','/')
+          Set-Location -Path $repo
+          git fetch origin
+          git reset --hard origin/master
+          Write-Host "Código atualizado em $repo. Orquestrador detectará a mudança automaticamente no próximo ciclo."

@@ -671,6 +671,26 @@ class Orchestrator:
         elif cmd.action == "reload":
             logger.info("Reload manual do config.yaml solicitado")
             self._reload_config()
+        elif cmd.action == "shutdown":
+            self._request_shutdown()
+
+    def _request_shutdown(self) -> None:
+        """Encerramento total solicitado pela UI.
+
+        Mata todos os apps + subprocessos e quebra o `_monitor_loop`. O
+        `start()` retorna, e o entrypoint em `main.py` derruba o dashboard.
+        O `config.yaml` (caminhos, slots, RAM, etc dos apps) é preservado
+        intacto — nenhum comando aqui o modifica.
+        """
+        logger.warning("=" * 60)
+        logger.warning("SHUTDOWN solicitado pela UI — derrubando orquestrador")
+        logger.warning("=" * 60)
+        self._stop_all()
+        self._running = False
+        # Acordar quem aguarda RAM/memória pra que as tasks possam sair
+        # do loop interno e serem canceladas em `_disable_app`
+        self._release_memory_event()
+        save_state(self.state)
 
     # ── Lifecycle ───────────────────────────────────────────────
 
@@ -699,7 +719,12 @@ class Orchestrator:
         save_state(self.state)
         logger.info("Orquestrador rodando. Use o dashboard para controlar os apps.")
 
-        await self._monitor_loop()
+        try:
+            await self._monitor_loop()
+        finally:
+            # Cleanup final — idempotente, garante que nenhum manager ou task
+            # fica vivo quando saímos do loop (incl. saída via comando shutdown).
+            await self.stop()
 
     async def stop(self) -> None:
         logger.info("Parando orquestrador...")

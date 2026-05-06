@@ -128,7 +128,7 @@ def load_state() -> ControlPlaneState:
 
 @dataclass
 class Command:
-    action: str  # start, stop, pause, resume, start_all, stop_all
+    action: str  # start, stop, pause, resume, start_all, stop_all, reload, shutdown
     app_name: str = ""  # vazio para comandos globais
 
 
@@ -148,7 +148,7 @@ def read_commands(commands_dir: Path | None = None) -> list[Command]:
     for f in d.glob("*.trigger"):
         stem = f.stem
         # Parse: action_appname ou action (global)
-        if stem in ("start_all", "stop_all", "reload"):
+        if stem in ("start_all", "stop_all", "reload", "shutdown"):
             commands.append(Command(action=stem))
         elif "_" in stem:
             action, app_name = stem.split("_", 1)

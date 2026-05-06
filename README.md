@@ -648,11 +648,26 @@ commands/
 ├── resume_<app>.trigger     # retomar do pause
 ├── start_all.trigger        # ativar todos
 ├── stop_all.trigger         # desativar todos
-└── reload.trigger           # forçar reload do config.yaml
+├── reload.trigger           # forçar reload do config.yaml
+└── shutdown.trigger         # encerrar orquestrador (mata todos os apps
+                             # e seus subprocessos; preserva config.yaml)
 ```
 
 O `_monitor_loop` lê e remove os triggers a cada 5s. O dashboard usa
 `write_command(COMMANDS_DIR, action, app_name)` para gerar os arquivos.
+
+### Botão "Derrubar" (shutdown via UI)
+
+A aba **Status** tem um botão **⏻ Derrubar** ao lado de Start All / Stop All.
+Ao clicar, aparece confirmação inline; confirmando, o orquestrador:
+
+1. Recebe o trigger `shutdown` em até 5s
+2. Chama `_stop_all()` — mata todos os apps via Job Object + cleanup
+3. Sai do `_monitor_loop` e faz `await stop()` (cleanup idempotente)
+4. O entrypoint em `main.py` derruba o dashboard Streamlit no `finally`
+
+**O `config.yaml` é preservado intacto** — nenhuma rota de shutdown o
+modifica. Para reiniciar, use o atalho do desktop ou `python -m src.main`.
 
 ---
 
