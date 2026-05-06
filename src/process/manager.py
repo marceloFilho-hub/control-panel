@@ -77,8 +77,9 @@ class ProcessManager:
         self._exec_logger = ExecutionLogger(self.cfg.name)
         self._peak_ram_mb = 0.0
 
-        # Pre-start hooks: git_pull (best-effort) + pre_start[] (sequencial).
-        # Saída unificada no .log da execução com prefixos [git]/[pre].
+        # Pre-start hooks: pre_start[] (sequencial). O auto-update via git
+        # é responsabilidade do Orchestrator e roda ANTES desta chamada,
+        # com slot e gate de memória já adquiridos.
         hooks_ok, hook_err = await self._run_pre_start_hooks(cwd, env)
         if not hooks_ok:
             logger.error(f"[{self.cfg.name}] Hook pré-execução falhou: {hook_err}")
@@ -164,7 +165,7 @@ class ProcessManager:
         logger.info(f"[{self.cfg.name}] PID {self._process.pid} iniciado")
         return self._process.pid
 
-    # ── Pre-start hooks (git_pull + pre_start[]) ───────────────────
+    # ── Pre-start hooks (pre_start[]) ──────────────────────────────
 
     def _resolve_venv_executables(self, cwd: Path) -> tuple[str, str]:
         """Retorna (python_exe, pip_exe) preferindo o .venv do projeto.
@@ -251,17 +252,20 @@ class ProcessManager:
         cwd: Path,
         env: dict[str, str],
     ) -> tuple[bool, str]:
-        """Executa git_pull (best-effort) + pre_start[] (configurável).
+        """Executa pre_start[] (sequencial, configurável por app).
 
         Retorna (success, error_msg). `success=False` apenas quando algum
-        comando do `pre_start` falhou e `pre_start_required=True`. Falha do
-        `git_pull` é sempre best-effort (loga + alerta, mas retorna True).
+        comando do `pre_start` falhou e `pre_start_required=True`.
 
-        O timeout total (`pre_start_timeout`) cobre git_pull + todos os
+        O timeout total (`pre_start_timeout`) cobre todos os comandos do
         pre_start juntos. Se estourar entre comandos, aborta o restante.
+
+        Auto-update via git roda ANTES desta chamada, no Orchestrator
+        (ver `Orchestrator._auto_update_for_app`). Não é responsabilidade
+        deste método.
         """
         cfg = self.cfg
-        if not cfg.git_pull and not cfg.pre_start:
+        if not cfg.pre_start:
             return True, ""
 
         deadline = time.time() + max(1, cfg.pre_start_timeout)
@@ -269,67 +273,32 @@ class ProcessManager:
         def remaining() -> float:
             return max(0.0, deadline - time.time())
 
-        # 1) git pull (best-effort)
-        if cfg.git_pull:
-            if not (cwd / ".git").exists():
-                logger.info(
-                    f"[{cfg.name}] git_pull=true mas {cwd} não é repo git — pulando"
-                )
-                if self._exec_logger is not None:
-                    self._exec_logger.write(
-                        b"[git] cwd nao e repo git, pulando\n"
-                    )
-            else:
-                rc, err = await self._run_one_hook(
-                    "git pull --ff-only",
-                    cwd,
-                    env,
-                    b"[git] ",
-                    timeout=remaining() or 60.0,
-                )
-                if rc != 0:
-                    msg = f"git pull falhou (rc={rc}): {err.strip()[:200]}"
-                    logger.warning(f"[{cfg.name}] {msg}")
-                    try:
-                        await self.alerter.alert_failure(
-                            cfg.name,
-                            rc,
-                            f"git_pull (best-effort): {msg}",
-                            run_id=self._run_id,
-                        )
-                    except Exception:
-                        pass
-                else:
-                    logger.info(f"[{cfg.name}] git pull OK")
+        python_str, pip_str = self._resolve_venv_executables(cwd)
+        for raw_cmd in cfg.pre_start:
+            cmd = (raw_cmd or "").strip()
+            if not cmd:
+                continue
+            cmd = cmd.replace("{python}", python_str).replace("{pip}", pip_str)
+            if remaining() <= 0:
+                msg = "timeout total dos hooks atingido"
+                logger.error(f"[{cfg.name}] {msg}")
+                if cfg.pre_start_required:
+                    return False, msg
+                return True, ""
 
-        # 2) pre_start[] (sequencial, com substituição {python}/{pip})
-        if cfg.pre_start:
-            python_str, pip_str = self._resolve_venv_executables(cwd)
-            for raw_cmd in cfg.pre_start:
-                cmd = (raw_cmd or "").strip()
-                if not cmd:
-                    continue
-                cmd = cmd.replace("{python}", python_str).replace("{pip}", pip_str)
-                if remaining() <= 0:
-                    msg = "timeout total dos hooks atingido"
+            rc, err = await self._run_one_hook(
+                cmd,
+                cwd,
+                env,
+                b"[pre] ",
+                timeout=remaining(),
+            )
+            if rc != 0:
+                msg = f"comando falhou (rc={rc}): {cmd} | {err.strip()[:200]}"
+                if cfg.pre_start_required:
                     logger.error(f"[{cfg.name}] {msg}")
-                    if cfg.pre_start_required:
-                        return False, msg
-                    return True, ""
-
-                rc, err = await self._run_one_hook(
-                    cmd,
-                    cwd,
-                    env,
-                    b"[pre] ",
-                    timeout=remaining(),
-                )
-                if rc != 0:
-                    msg = f"comando falhou (rc={rc}): {cmd} | {err.strip()[:200]}"
-                    if cfg.pre_start_required:
-                        logger.error(f"[{cfg.name}] {msg}")
-                        return False, msg
-                    logger.warning(f"[{cfg.name}] (não-bloqueante) {msg}")
+                    return False, msg
+                logger.warning(f"[{cfg.name}] (não-bloqueante) {msg}")
 
         return True, ""
 

@@ -28,17 +28,19 @@ class AppConfig:
     env_file: str = ""  # caminho do .env a carregar antes de executar (opcional)
     env: dict[str, str] = field(default_factory=dict)
     # ── Pre-start hooks ─────────────────────────────────────
-    # git_pull: se True, executa `git pull --ff-only` no cwd antes de cada
-    # rodada (best-effort — falha não bloqueia execução do app).
+    # git_pull: DEPRECATED — desde a centralização do auto-update via
+    # `settings.auto_update`, o orquestrador descobre o repo a partir do
+    # cwd e atualiza automaticamente, sem flag por app. Mantido aqui só
+    # para aceitar configs antigas sem quebrar; é ignorado em runtime.
     git_pull: bool = False
     # pre_start: lista de comandos shell executados sequencialmente no cwd
     # antes do app principal. Suporta substituição de {python} e {pip} pelo
     # executável do venv detectado em cwd/.venv/Scripts.
     pre_start: list[str] = field(default_factory=list)
-    # Timeout TOTAL (segundos) somando git_pull + todos os pre_start
+    # Timeout TOTAL (segundos) de todos os pre_start somados
     pre_start_timeout: int = 300
     # Se True, falha em qualquer comando do pre_start aborta a execução do
-    # app. Se False, apenas loga e segue. git_pull sempre é best-effort.
+    # app. Se False, apenas loga e segue.
     pre_start_required: bool = True
 
 
@@ -52,9 +54,33 @@ class AlertsConfig:
 
 
 @dataclass
+class AutoUpdateConfig:
+    """Configuração global do auto-update via git.
+
+    O orquestrador descobre o repo a partir do `cwd` de cada app e faz
+    `git fetch + git reset --hard <remote>/<branch>` antes de iniciar o
+    processo (com slot e gate de memória já adquiridos). Não há
+    configuração por app.
+    """
+
+    enabled: bool = True
+    # Política em caso de falha do update (fetch/reset não completam OK):
+    #   "abort_cycle"  → libera slot, alerta, próximo ciclo tenta de novo
+    #   "skip_update"  → loga warning e segue rodando com a versão em disco
+    on_failure: str = "abort_cycle"
+    # Timeout total (s) para fetch + reset somados em cada app
+    timeout_seconds: int = 60
+    # Lista de paths absolutos de repo_root a IGNORAR (comparação por
+    # path resolvido). Útil para repos em desenvolvimento ativo na VM
+    # ou que tenham peculiaridades.
+    skip_paths: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ControlPlaneConfig:
     apps: dict[str, AppConfig]
     alerts: AlertsConfig
+    auto_update: AutoUpdateConfig = field(default_factory=AutoUpdateConfig)
     log_dir: str = "logs/"
     log_rotation: str = "10 MB"
     log_retention: int = 30
@@ -133,9 +159,21 @@ def load_config(config_path: str | Path = "config.yaml") -> ControlPlaneConfig:
 
     settings = raw.get("settings", {})
 
+    auto_update_raw = settings.get("auto_update", {}) or {}
+    on_failure = auto_update_raw.get("on_failure", "abort_cycle")
+    if on_failure not in ("abort_cycle", "skip_update"):
+        on_failure = "abort_cycle"
+    auto_update = AutoUpdateConfig(
+        enabled=bool(auto_update_raw.get("enabled", True)),
+        on_failure=on_failure,
+        timeout_seconds=int(auto_update_raw.get("timeout_seconds", 60)),
+        skip_paths=list(auto_update_raw.get("skip_paths") or []),
+    )
+
     return ControlPlaneConfig(
         apps=apps,
         alerts=alerts,
+        auto_update=auto_update,
         log_dir=settings.get("log_dir", "logs/"),
         log_rotation=settings.get("log_rotation", "10 MB"),
         log_retention=settings.get("log_retention", 30),

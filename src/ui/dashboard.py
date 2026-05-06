@@ -420,9 +420,10 @@ def _render_python_registration(state: ControlPlaneState) -> None:
             with c4:
                 gui_chk = st.checkbox("📺 GUI", help="Marcar se o app abre janela (Tkinter, PyQt...)")
 
-            git_pull_chk = st.checkbox(
-                "🔄 git pull --ff-only no cwd antes de cada execução",
-                help="Atualiza o repositório do app antes de rodar (best-effort: se falhar, segue com o código local).",
+            st.caption(
+                "🔄 Auto-update via git é global — controlado em "
+                "`settings.auto_update` no config.yaml e ativo por padrão "
+                "para todo cwd que seja repo git com remote."
             )
 
             submit = st.form_submit_button("➕ Cadastrar app", type="primary")
@@ -448,8 +449,6 @@ def _render_python_registration(state: ControlPlaneState) -> None:
                         app_data["env_file"] = str(project.env_file).replace("\\", "/")
                     if gui_chk:
                         app_data["gui"] = True
-                    if git_pull_chk:
-                        app_data["git_pull"] = True
 
                     upsert_app(CONFIG_PATH, app_name.strip(), app_data)
                     st.success(
@@ -547,25 +546,18 @@ def _render_python_app_row(name: str, data: dict, state: ControlPlaneState) -> N
     )
 
     # ── Hooks pré-execução ────────────────────────────────────
-    with st.expander("🪝 Hooks pré-execução (git pull + pre_start)", expanded=False):
+    with st.expander("🪝 Hooks pré-execução (pre_start)", expanded=False):
         st.caption(
-            "Executados antes de cada rodada do app. A saída é gravada no "
-            "log da execução com prefixos `[git]` e `[pre]`."
+            "Comandos shell executados antes de cada rodada do app. A saída "
+            "é gravada no log da execução com prefixo `[pre]`. O auto-update "
+            "via git é global (`settings.auto_update`) e roda automaticamente "
+            "antes destes hooks — não precisa configurar aqui."
         )
-        h1, h2 = st.columns([1, 1])
-        with h1:
-            git_pull_chk = st.checkbox(
-                "🔄 git pull --ff-only no cwd antes de cada execução",
-                value=data.get("git_pull", False),
-                key=f"py_gp_{name}",
-                help="Best-effort: se falhar, alerta no Telegram mas a execução continua com o código local.",
-            )
-        with h2:
-            pre_required_chk = st.checkbox(
-                "Abortar se hook do pre_start falhar",
-                value=data.get("pre_start_required", True),
-                key=f"py_psr_{name}",
-            )
+        pre_required_chk = st.checkbox(
+            "Abortar se hook do pre_start falhar",
+            value=data.get("pre_start_required", True),
+            key=f"py_psr_{name}",
+        )
 
         existing_pre = data.get("pre_start") or []
         if isinstance(existing_pre, str):
@@ -585,7 +577,7 @@ def _render_python_app_row(name: str, data: dict, state: ControlPlaneState) -> N
             value=int(data.get("pre_start_timeout", 300)),
             step=30,
             key=f"py_pst_{name}",
-            help="Tempo máximo somando git_pull + todos os pre_start.",
+            help="Tempo máximo somando todos os pre_start.",
         )
 
     if save:
@@ -604,10 +596,9 @@ def _render_python_app_row(name: str, data: dict, state: ControlPlaneState) -> N
         else:
             updated.pop("gui", None)
         # Hooks pré-execução
-        if git_pull_chk:
-            updated["git_pull"] = True
-        else:
-            updated.pop("git_pull", None)
+        # `git_pull` foi removido — auto-update é global via settings.auto_update.
+        # Limpamos a chave residual de configs antigas para manter o YAML enxuto.
+        updated.pop("git_pull", None)
         pre_lines = [
             line.strip()
             for line in (pre_start_text or "").splitlines()

@@ -19,6 +19,7 @@
 - [Arquitetura](#arquitetura)
 - [Como rodar](#como-rodar)
 - [Cadastro de apps](#cadastro-de-apps)
+- [Auto-update via git](#auto-update-via-git)
 - [Orquestração e filas](#orquestração-e-filas)
 - [Cleanup e Job Objects](#cleanup-e-job-objects)
 - [Persistência](#persistência)
@@ -177,10 +178,15 @@ complexidade de migração.
  5. _run_job:
     5a. slot semaphore.acquire()    ← fila por slot
     5b. _wait_for_memory()           ← fila por RAM
-    5c. ProcessManager.start()
+    5c. _auto_update_for_app()       ← GLOBAL (settings.auto_update)
+        • discover_repo(cwd) — sobe pais até .git
+        • lock por repo_root resolvido (serializa pulls do mesmo repo)
+        • skip se outro app vivo no mesmo repo
+        • git fetch + git reset --hard <remote>/<branch>
+        • falha → on_failure=abort_cycle libera slot, próximo ciclo tenta
+    5d. ProcessManager.start()
         • abre ExecutionLogger + gera run_id
-        • _run_pre_start_hooks(cwd, env)   ← NOVO
-            – git_pull (best-effort, prefixo [git])
+        • _run_pre_start_hooks(cwd, env)   ← pre_start[] por app
             – pre_start[] sequencial (prefixo [pre])
             – {python}/{pip} resolvidos do .venv
             – timeout cumulativo (pre_start_timeout)
@@ -320,44 +326,82 @@ apps:
 | `auto_start` | bool | false | Inicia junto com o orquestrador |
 | `restart_on_crash` | bool | false | Apenas para `slot: always` |
 | `gui` | bool | false | `CREATE_BREAKAWAY_FROM_JOB` para janelas |
-| `git_pull` | bool | false | Atalho para `git pull --ff-only` no `cwd` antes de cada rodada (best-effort) |
 | `pre_start` | list[str] | `[]` | Comandos shell sequenciais executados no `cwd` antes do app — suporta `{python}`/`{pip}` |
-| `pre_start_timeout` | int (segundos) | 300 | Timeout cumulativo para `git_pull` + todos os `pre_start` |
+| `pre_start_timeout` | int (segundos) | 300 | Timeout cumulativo para os `pre_start` |
 | `pre_start_required` | bool | true | Se true, falha em qualquer `pre_start` aborta a rodada; se false, apenas loga |
 
-### Hooks pré-execução
+> O campo `git_pull: true` por app é **deprecated** e ignorado em runtime.
+> Auto-update via git agora é controlado em `settings.auto_update` (ver
+> seção [Auto-update via git](#auto-update-via-git) abaixo). Configs
+> antigas continuam carregando sem erro.
 
-Cada app pode declarar uma fase de preparação executada **antes** do subprocess
+### Auto-update via git
+
+Antes de cada rodada, com slot e gate de RAM já adquiridos e antes de
+iniciar o subprocess, o orquestrador descobre o repo a partir do `cwd`
+do app e roda `git fetch + git reset --hard <remote>/<branch>`.
+**Não há configuração por app** — a feature é responsabilidade do
+orquestrador.
+
+```yaml
+settings:
+  auto_update:
+    enabled: true             # liga/desliga global
+    on_failure: abort_cycle   # ou skip_update
+    timeout_seconds: 60       # total para fetch + reset somados
+    skip_paths: []            # lista de repo_root absolutos a ignorar
+```
+
+Como funciona:
+
+- **Detecção do repo**: sobe os pais do `cwd` até achar `.git`.
+  Funciona com `cwd` apontando para subpasta (ex: `repo/src/entrypoints`).
+- **Branch**: `git rev-parse --abbrev-ref HEAD` no repo root —
+  usa o que está checked out, não hardcoded `main`.
+- **Remote**: `branch.<branch>.remote` (com fallback `origin`).
+  Sem remote configurado → no-op silencioso.
+- **Lock por repo_root resolvido**: se dois apps compartilham o
+  mesmo repo (ex: futuro `monitor_*` + `executor_*` no mesmo projeto),
+  só um faz pull por vez.
+- **Skip se outro app do mesmo repo está vivo**: pull não pode
+  rodar enquanto arquivos do repo estão em uso. Loga warning,
+  segue com a versão em disco. Próximo ciclo tenta de novo.
+- **Falha com `on_failure: abort_cycle`** (default): libera slot,
+  alerta no Telegram, próximo ciclo tenta de novo. **Nunca roda
+  app silenciosamente com versão antiga após erro.**
+- **`skip_paths`**: lista de paths absolutos de repo_root a ignorar
+  (comparação por `Path.resolve()`). Útil para repos em desenvolvimento
+  ativo na VM que não devem ser sobrescritos.
+
+### Hooks pré-execução (`pre_start`)
+
+Cada app pode declarar comandos shell executados **antes** do subprocess
 principal, dentro do mesmo `run_id` e com a saída unificada no `.log` da
-execução (prefixos `[git]` e `[pre]`):
+execução (prefixo `[pre]`):
 
 ```yaml
 apps:
   meu_robo:
     cwd: C:/proj/meu_robo
     cmd: '"C:/proj/meu_robo/.venv/Scripts/python.exe" "src/main.py"'
-    git_pull: true                  # roda `git pull --ff-only` no cwd
     pre_start:
       - "{python} -m pip install -r requirements.txt"
       - "{python} scripts/migrate.py"
-    pre_start_timeout: 300          # total para git_pull + pre_start
+    pre_start_timeout: 300          # total dos pre_start somados
     pre_start_required: true        # falha aborta a rodada
 ```
 
-- **`git_pull`** é sempre **best-effort**: se falha, gera alerta no Telegram
-  mas **não bloqueia** a execução do app (o pull errado não deve derrubar
-  o robô).
 - **`pre_start`** roda na ordem declarada via `subprocess_shell` no `cwd`,
   herdando o `env` do app (incluindo `.env` carregado).
 - **`{python}`** e **`{pip}`** são substituídos por
   `cwd/.venv/Scripts/python.exe` e `pip.exe` quando existem; caso
   contrário, recaem em `python` / `python -m pip` do PATH.
-- O `pre_start_timeout` é **cumulativo** — se o `git_pull` consome 60s, sobram
-  240s para os comandos do `pre_start`.
+- O `pre_start_timeout` é **cumulativo** entre os comandos.
+- O auto-update via git roda **antes** do `pre_start` (na fase de
+  orquestração), então comandos de `pre_start` já trabalham com o
+  código atualizado.
 - Configurável também pela UI: aba **⚙️ Configurar** → expander
-  **🪝 Hooks pré-execução** em cada card de app. O cadastro inicial de
-  app Python já oferece checkbox "🔄 git pull --ff-only no cwd antes
-  de cada execução".
+  **🪝 Hooks pré-execução** em cada card de app.
 
 ---
 
@@ -493,7 +537,7 @@ A cada 5s, `_monitor_loop` verifica o mtime do `config.yaml`. Se mudou,
 - **Apps novos** → criados no state
 - **Apps removidos** → disabled + removidos do state
 - **Apps alterados** (cmd/cwd/slot/schedule/pause_between/ram/timeout/
-  git_pull/pre_start/pre_start_timeout/pre_start_required)
+  pre_start/pre_start_timeout/pre_start_required)
   → disabled + re-enabled com nova config
 - **Apps iguais** → não são tocados (zero downtime)
 
@@ -826,14 +870,29 @@ Algum comando do `pre_start` saiu com exit code != 0 (ou o `pre_start_timeout`
 estourou). Diagnóstico:
 
 - Abra o `.log` da execução em `logs/<app>/<timestamp>_<id>.log` — as linhas
-  prefixadas com `[git]` e `[pre]` mostram a saída exata de cada hook.
+  prefixadas com `[pre]` mostram a saída exata de cada hook.
 - Se for um problema temporário (lock do `pip`, indisponibilidade de rede),
   considere `pre_start_required: false` — falha apenas loga e o app segue.
 - Se `{python}`/`{pip}` resolveram para o Python do PATH em vez do `.venv`:
   confirme que existe `cwd/.venv/Scripts/python.exe` no working directory
   do app (não na raiz do control_panel).
-- O `git_pull` é sempre best-effort — falha dele **não** dispara o erro
-  acima; só gera alerta Telegram.
+
+### App falha com "auto-update: ..."
+
+O `git fetch` ou `git reset --hard` falhou (rede, auth, repo corrompido).
+O ciclo é abortado **sem iniciar o processo** (com `on_failure: abort_cycle`,
+o default) e o próximo ciclo tenta de novo. Diagnóstico:
+
+- O log do orchestrator (`logs/orchestrator-*.log`) mostra a saída
+  exata do git em `auto-update FALHOU: <stderr>`.
+- Se o repo está em estado inválido (rebase/merge no meio), resolver
+  manualmente no `cwd` e o próximo ciclo recupera.
+- Para repos que **não devem** ser atualizados (ex: desenvolvimento
+  ativo na VM), adicionar o repo_root absoluto em
+  `settings.auto_update.skip_paths`.
+- Para tolerar falhas temporárias sem abortar, mudar
+  `settings.auto_update.on_failure` para `skip_update` — o app roda
+  com a versão em disco e segue (warning no log).
 
 ### Apps sumiram após git pull
 
