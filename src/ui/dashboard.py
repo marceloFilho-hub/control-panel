@@ -420,6 +420,12 @@ def _render_python_registration(state: ControlPlaneState) -> None:
             with c4:
                 gui_chk = st.checkbox("📺 GUI", help="Marcar se o app abre janela (Tkinter, PyQt...)")
 
+            st.caption(
+                "🔄 Auto-update via git é global — controlado em "
+                "`settings.auto_update` no config.yaml e ativo por padrão "
+                "para todo cwd que seja repo git com remote."
+            )
+
             submit = st.form_submit_button("➕ Cadastrar app", type="primary")
 
             if submit:
@@ -539,6 +545,41 @@ def _render_python_app_row(name: str, data: dict, state: ControlPlaneState) -> N
         key=f"py_gui_{name}",
     )
 
+    # ── Hooks pré-execução ────────────────────────────────────
+    with st.expander("🪝 Hooks pré-execução (pre_start)", expanded=False):
+        st.caption(
+            "Comandos shell executados antes de cada rodada do app. A saída "
+            "é gravada no log da execução com prefixo `[pre]`. O auto-update "
+            "via git é global (`settings.auto_update`) e roda automaticamente "
+            "antes destes hooks — não precisa configurar aqui."
+        )
+        pre_required_chk = st.checkbox(
+            "Abortar se hook do pre_start falhar",
+            value=data.get("pre_start_required", True),
+            key=f"py_psr_{name}",
+        )
+
+        existing_pre = data.get("pre_start") or []
+        if isinstance(existing_pre, str):
+            existing_pre = [existing_pre]
+        pre_start_text = st.text_area(
+            "Comandos pre_start (1 por linha)",
+            value="\n".join(existing_pre),
+            key=f"py_ps_{name}",
+            height=100,
+            placeholder='{python} -m pip install -r requirements.txt\n{python} scripts/migrate.py',
+            help="Suporta {python} e {pip} (resolvidos para .venv/Scripts/* do cwd).",
+        )
+
+        pre_timeout = st.number_input(
+            "Timeout total dos hooks (segundos)",
+            min_value=10, max_value=3600,
+            value=int(data.get("pre_start_timeout", 300)),
+            step=30,
+            key=f"py_pst_{name}",
+            help="Tempo máximo somando todos os pre_start.",
+        )
+
     if save:
         updated = {**data, "slot": slot, "max_ram_mb": int(ram)}
         updated["schedule"] = "loop" if enabled_chk and slot != "always" else "manual"
@@ -554,6 +595,27 @@ def _render_python_app_row(name: str, data: dict, state: ControlPlaneState) -> N
             updated["gui"] = True
         else:
             updated.pop("gui", None)
+        # Hooks pré-execução
+        # `git_pull` foi removido — auto-update é global via settings.auto_update.
+        # Limpamos a chave residual de configs antigas para manter o YAML enxuto.
+        updated.pop("git_pull", None)
+        pre_lines = [
+            line.strip()
+            for line in (pre_start_text or "").splitlines()
+            if line.strip()
+        ]
+        if pre_lines:
+            updated["pre_start"] = pre_lines
+            updated["pre_start_timeout"] = int(pre_timeout)
+            # pre_start_required é True por default — só persiste se for False
+            if not pre_required_chk:
+                updated["pre_start_required"] = False
+            else:
+                updated.pop("pre_start_required", None)
+        else:
+            updated.pop("pre_start", None)
+            updated.pop("pre_start_timeout", None)
+            updated.pop("pre_start_required", None)
         upsert_app(CONFIG_PATH, name, updated)
         st.success(f"✅ '{name}' atualizado — hot reload em até 5s")
         st.rerun()

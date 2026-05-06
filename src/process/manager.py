@@ -77,6 +77,25 @@ class ProcessManager:
         self._exec_logger = ExecutionLogger(self.cfg.name)
         self._peak_ram_mb = 0.0
 
+        # Pre-start hooks: pre_start[] (sequencial). O auto-update via git
+        # é responsabilidade do Orchestrator e roda ANTES desta chamada,
+        # com slot e gate de memória já adquiridos.
+        hooks_ok, hook_err = await self._run_pre_start_hooks(cwd, env)
+        if not hooks_ok:
+            logger.error(f"[{self.cfg.name}] Hook pré-execução falhou: {hook_err}")
+            self.state.status = "failed"
+            self.state.last_error = f"Hook pré-execução: {hook_err}"
+            self._exec_logger.close(
+                status="failed",
+                exit_code=-1,
+                error=f"Hook pré-execução: {hook_err}",
+                peak_ram_mb=0.0,
+            )
+            await self.alerter.alert_failure(
+                self.cfg.name, -1, f"Hook pré-execução: {hook_err}", run_id=self._run_id
+            )
+            return None
+
         # Flags de criação do processo — apps GUI precisam escapar do Job
         # Object e herdar o desktop interativo do usuário. Sem isso, janelas
         # Tkinter/PyQt não aparecem (ficam no WindowStation errado).
@@ -120,6 +139,8 @@ class ProcessManager:
         self.state.last_error = ""
         self._exec_logger.record.pid = self._process.pid
         self._cleanup_done = False
+        # Hooks já rodaram com sucesso antes do subprocess principal —
+        # registra o resultado no record para aparecer no history.jsonl.
 
         # Associar ao Windows Job Object ASAP para capturar futuros filhos.
         # Exceto para apps GUI — esses precisam escapar do job pra herdar
@@ -143,6 +164,143 @@ class ProcessManager:
 
         logger.info(f"[{self.cfg.name}] PID {self._process.pid} iniciado")
         return self._process.pid
+
+    # ── Pre-start hooks (pre_start[]) ──────────────────────────────
+
+    def _resolve_venv_executables(self, cwd: Path) -> tuple[str, str]:
+        """Retorna (python_exe, pip_exe) preferindo o .venv do projeto.
+
+        Procura `cwd/.venv/Scripts/python.exe` e `cwd/.venv/Scripts/pip.exe`.
+        Se não existir, cai no `python`/`pip` do PATH. Pip é resolvido como
+        `<python> -m pip` quando o pip.exe direto não está disponível.
+        """
+        venv_python = cwd / ".venv" / "Scripts" / "python.exe"
+        venv_pip = cwd / ".venv" / "Scripts" / "pip.exe"
+
+        if venv_python.exists():
+            python_str = f'"{venv_python}"' if " " in str(venv_python) else str(venv_python)
+            if venv_pip.exists():
+                pip_str = f'"{venv_pip}"' if " " in str(venv_pip) else str(venv_pip)
+            else:
+                pip_str = f'{python_str} -m pip'
+            return python_str, pip_str
+
+        return "python", "python -m pip"
+
+    async def _run_one_hook(
+        self,
+        cmd: str,
+        cwd: Path,
+        env: dict[str, str],
+        prefix: bytes,
+        timeout: float,
+    ) -> tuple[int, str]:
+        """Executa um único hook shell e devolve (returncode, last_stderr_snippet).
+
+        Saída completa (stdout+stderr) vai pro `_exec_logger` linha a linha
+        com o prefixo informado. Em caso de timeout, retorna (-1, "timeout").
+        """
+        if self._exec_logger is not None:
+            header = f"\n[hook] $ {cmd}\n".encode("utf-8")
+            self._exec_logger.write(header)
+
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                cmd,
+                cwd=str(cwd),
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except Exception as e:
+            err = f"falha ao iniciar hook: {e}"
+            if self._exec_logger is not None:
+                self._exec_logger.write(prefix + err.encode("utf-8") + b"\n")
+            return -1, err
+
+        try:
+            stdout_data, stderr_data = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+            if self._exec_logger is not None:
+                self._exec_logger.write(prefix + b"timeout\n")
+            return -1, "timeout"
+
+        if self._exec_logger is not None:
+            for raw in (stdout_data or b"").splitlines(keepends=True):
+                self._exec_logger.write(prefix + raw)
+            for raw in (stderr_data or b"").splitlines(keepends=True):
+                self._exec_logger.write(prefix + raw)
+
+        rc = proc.returncode if proc.returncode is not None else -1
+        last_err = ""
+        if rc != 0:
+            try:
+                last_err = (stderr_data or b"").decode("utf-8", errors="replace")[-300:]
+            except Exception:
+                last_err = ""
+        return rc, last_err
+
+    async def _run_pre_start_hooks(
+        self,
+        cwd: Path,
+        env: dict[str, str],
+    ) -> tuple[bool, str]:
+        """Executa pre_start[] (sequencial, configurável por app).
+
+        Retorna (success, error_msg). `success=False` apenas quando algum
+        comando do `pre_start` falhou e `pre_start_required=True`.
+
+        O timeout total (`pre_start_timeout`) cobre todos os comandos do
+        pre_start juntos. Se estourar entre comandos, aborta o restante.
+
+        Auto-update via git roda ANTES desta chamada, no Orchestrator
+        (ver `Orchestrator._auto_update_for_app`). Não é responsabilidade
+        deste método.
+        """
+        cfg = self.cfg
+        if not cfg.pre_start:
+            return True, ""
+
+        deadline = time.time() + max(1, cfg.pre_start_timeout)
+
+        def remaining() -> float:
+            return max(0.0, deadline - time.time())
+
+        python_str, pip_str = self._resolve_venv_executables(cwd)
+        for raw_cmd in cfg.pre_start:
+            cmd = (raw_cmd or "").strip()
+            if not cmd:
+                continue
+            cmd = cmd.replace("{python}", python_str).replace("{pip}", pip_str)
+            if remaining() <= 0:
+                msg = "timeout total dos hooks atingido"
+                logger.error(f"[{cfg.name}] {msg}")
+                if cfg.pre_start_required:
+                    return False, msg
+                return True, ""
+
+            rc, err = await self._run_one_hook(
+                cmd,
+                cwd,
+                env,
+                b"[pre] ",
+                timeout=remaining(),
+            )
+            if rc != 0:
+                msg = f"comando falhou (rc={rc}): {cmd} | {err.strip()[:200]}"
+                if cfg.pre_start_required:
+                    logger.error(f"[{cfg.name}] {msg}")
+                    return False, msg
+                logger.warning(f"[{cfg.name}] (não-bloqueante) {msg}")
+
+        return True, ""
 
     async def _stream_output(self, stream: asyncio.StreamReader | None, prefix: bytes) -> None:
         """Lê a stream do subprocesso linha a linha e grava no log."""

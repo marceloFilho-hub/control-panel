@@ -28,6 +28,23 @@
 #   gui: true → usa CREATE_BREAKAWAY_FROM_JOB (janela aparece)
 #
 # Apps da pasta apps_executaveis/ são marcados com _source: pasta.
+#
+# ── Auto-update via git (GLOBAL, sem config por app) ────────────
+# Configurado em settings.auto_update (mais abaixo neste arquivo).
+# O orquestrador descobre o repo a partir do `cwd` de cada app e roda
+# `git fetch + git reset --hard <remote>/<branch>` ENTRE as rodagens
+# (slot e gate de RAM já adquiridos). Se o cwd não está num repo git
+# ou o repo não tem remote, é no-op silencioso. Não há flag por app.
+#
+# ── Hooks pré-execução (opcionais por app) ─────────────────────
+#   pre_start:                 # comandos shell sequenciais antes do app
+#     - "{python} -m pip install -r requirements.txt"
+#     - "{python} scripts/migrate.py"
+#                              # {python}/{pip} são substituídos pelo
+#                              # executável do .venv detectado em cwd
+#   pre_start_timeout: 300     # segundos — total dos pre_start somados
+#   pre_start_required: true   # se false, falha do pre_start apenas loga
+#                              # (default true: aborta a execução)
 # ═══════════════════════════════════════════════════════════════
 
 # Começa vazio — cadastre apps pela UI ou cole um exemplo aqui.
@@ -55,3 +72,16 @@ settings:
   ram_safety_margin_mb: 512   # RAM reservada ao SO — antes de iniciar
                               # um app, orchestrator verifica se
                               # available - margin >= max_ram_mb dele
+
+  # ── Auto-update via git (GLOBAL — sem flag por app) ──────────
+  # Antes de cada rodada de cada app, com slot e gate de RAM já
+  # adquiridos, o orquestrador descobre o repo via cwd e atualiza.
+  # Estratégia única: git fetch + git reset --hard <remote>/<branch>.
+  auto_update:
+    enabled: true             # liga/desliga global. Default true.
+    on_failure: abort_cycle   # 'abort_cycle' libera slot e tenta no próximo
+                              # ciclo (recomendado). 'skip_update' loga
+                              # warning e roda com versão em disco.
+    timeout_seconds: 60       # total para fetch + reset somados
+    skip_paths: []            # paths absolutos de repo_root a IGNORAR
+                              # (ex: repos em desenvolvimento ativo na VM)

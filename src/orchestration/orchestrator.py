@@ -26,6 +26,7 @@ from loguru import logger
 
 from ..config.loader import ControlPlaneConfig, load_config
 from ..observability.alerter import TelegramAlerter
+from ..process.git_updater import RepoInfo, discover_repo, update_repo
 from ..process.manager import ProcessManager
 from ..process.resource_monitor import get_system_metrics
 from .state import (
@@ -65,6 +66,10 @@ class Orchestrator:
         self._memory_queue: list[str] = []
         # Evento sinalizado quando RAM libera — desperta quem aguarda memória
         self._memory_event = asyncio.Event()
+        # Locks de auto-update por repo_root resolvido. Garantem que dois apps
+        # do mesmo repo não façam fetch/reset concorrentes (que corromperia
+        # o índice do .git).
+        self._repo_locks: dict[str, asyncio.Lock] = {}
         # Hot reload do config.yaml
         self._config_path = _root / "config.yaml"
         self._last_config_mtime = (
@@ -136,6 +141,141 @@ class Orchestrator:
         """Acorda quem está aguardando RAM liberar."""
         self._memory_event.set()
 
+    # ── Auto-update via git ─────────────────────────────────────
+
+    def _get_repo_lock(self, repo_root: Path) -> asyncio.Lock:
+        """Retorna (criando se preciso) o lock para um repo_root resolvido.
+
+        A chave é a string do path absoluto resolvido — evita falso-paralelismo
+        quando duas configs apontam para o mesmo repo via caminhos com
+        diferenças cosméticas (separadores, case no Windows).
+        """
+        key = str(repo_root)
+        lock = self._repo_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._repo_locks[key] = lock
+        return lock
+
+    def _is_repo_path_skipped(self, repo_root: Path) -> bool:
+        """Compara repo_root contra a lista `auto_update.skip_paths`."""
+        try:
+            target = repo_root.resolve()
+        except (OSError, RuntimeError):
+            return False
+        for raw in self.config.auto_update.skip_paths:
+            try:
+                if Path(raw).resolve() == target:
+                    return True
+            except (OSError, RuntimeError):
+                continue
+        return False
+
+    def _other_app_running_in_repo(
+        self, repo_root: Path, exclude_app: str
+    ) -> str | None:
+        """Retorna o nome do primeiro app vivo cujo cwd cai no mesmo repo.
+
+        Usado para decidir se devemos PULAR o update (porque mexer em
+        arquivos do repo enquanto outro app os usa pode quebrar a
+        execução em andamento). None significa "ninguém mais usando".
+        """
+        try:
+            target = repo_root.resolve()
+        except (OSError, RuntimeError):
+            return None
+        for other_name, manager in self.managers.items():
+            if other_name == exclude_app:
+                continue
+            if not manager.is_alive():
+                continue
+            other_cfg = self.config.apps.get(other_name)
+            if not other_cfg:
+                continue
+            try:
+                other_root = Path(other_cfg.cwd).resolve()
+            except (OSError, RuntimeError):
+                continue
+            # Mesmo path ou ancestral compartilhado — checar se o cwd do
+            # outro está dentro do repo_root deste app
+            try:
+                other_root.relative_to(target)
+                return other_name
+            except ValueError:
+                pass
+        return None
+
+    async def _auto_update_for_app(self, app_name: str) -> tuple[bool, str]:
+        """Atualiza o repo do app antes do start. Retorna (ok, error_msg).
+
+        Fluxo:
+          1. Se `auto_update.enabled=False` global → no-op.
+          2. Descobre repo via cwd. Se não é git ou sem remote → no-op.
+          3. Se `repo_root` está em `skip_paths` → no-op.
+          4. Adquire lock por repo_root.
+          5. Se há outro app vivo do mesmo repo → SKIP do update (warning),
+             segue rodando com a versão em disco.
+          6. Roda fetch + reset --hard. Em falha:
+              - on_failure=abort_cycle → retorna (False, msg)
+              - on_failure=skip_update → retorna (True, "") com warning
+        """
+        if not self.config.auto_update.enabled:
+            return True, ""
+
+        cfg = self.config.apps.get(app_name)
+        if cfg is None:
+            return True, ""
+
+        try:
+            cwd = Path(cfg.cwd)
+        except Exception:
+            return True, ""
+
+        info: RepoInfo | None = await discover_repo(cwd)
+        if info is None or not info.has_remote:
+            return True, ""
+
+        if self._is_repo_path_skipped(info.root):
+            logger.debug(
+                f"[{app_name}] auto-update: repo {info.root} em skip_paths — pulando"
+            )
+            return True, ""
+
+        lock = self._get_repo_lock(info.root)
+        async with lock:
+            other = self._other_app_running_in_repo(info.root, exclude_app=app_name)
+            if other is not None:
+                logger.warning(
+                    f"[{app_name}] auto-update PULADO: '{other}' está rodando "
+                    f"no mesmo repo ({info.root}). Próximo ciclo tenta de novo."
+                )
+                return True, ""
+
+            timeout = max(5, self.config.auto_update.timeout_seconds)
+            logger.info(
+                f"[{app_name}] auto-update: {info.remote}/{info.branch} em {info.root}"
+            )
+            result = await update_repo(info, timeout=float(timeout))
+
+        if result.success:
+            logger.info(
+                f"[{app_name}] auto-update OK em {result.duration_ms} ms"
+            )
+            return True, ""
+
+        msg = f"{result.error}: {result.output.strip()[:200]}"
+        if self.config.auto_update.on_failure == "skip_update":
+            logger.warning(
+                f"[{app_name}] auto-update FALHOU (skip_update): {msg} — "
+                f"seguindo com versão em disco"
+            )
+            return True, ""
+
+        logger.error(
+            f"[{app_name}] auto-update FALHOU (abort_cycle): {msg}"
+        )
+        return False, msg
+
     # ── Execução de jobs ────────────────────────────────────────
 
     async def _run_job(self, app_name: str) -> None:
@@ -171,7 +311,26 @@ class Orchestrator:
             if not app_state.enabled or not self._running:
                 return
 
-            # 3) Iniciar processo
+            # 3) Auto-update do repo (slot já adquirido + RAM ok). Falha aqui
+            #    aborta este ciclo SEM iniciar o processo: libera slot no
+            #    finally e o próximo ciclo tenta de novo.
+            update_ok, update_err = await self._auto_update_for_app(app_name)
+            if not update_ok:
+                app_state.status = "failed"
+                app_state.last_error = f"auto-update: {update_err}"
+                save_state(self.state)
+                try:
+                    await self.alerter.alert_failure(
+                        app_name, -1, f"auto-update: {update_err}", run_id=None
+                    )
+                except Exception:
+                    pass
+                return
+
+            if not app_state.enabled or not self._running:
+                return
+
+            # 4) Iniciar processo
             manager = ProcessManager(cfg, app_state, self.alerter)
             self.managers[app_name] = manager
             pid = await manager.start()
@@ -216,6 +375,26 @@ class Orchestrator:
             await self._wait_for_memory(app_name, cfg.max_ram_mb)
             if not app_state.enabled or not self._running:
                 return
+
+            # Auto-update do repo. Falha respeita on_failure:
+            #   abort_cycle → aguarda 30s e tenta de novo
+            #   skip_update → segue com versão em disco
+            update_ok, update_err = await self._auto_update_for_app(app_name)
+            if not update_ok:
+                app_state.status = "failed"
+                app_state.last_error = f"auto-update: {update_err}"
+                save_state(self.state)
+                try:
+                    await self.alerter.alert_failure(
+                        app_name, -1, f"auto-update: {update_err}", run_id=None
+                    )
+                except Exception:
+                    pass
+                for _ in range(30):
+                    if not app_state.enabled or not self._running:
+                        return
+                    await asyncio.sleep(1)
+                continue
 
             manager = ProcessManager(cfg, app_state, self.alerter)
             self.managers[app_name] = manager
@@ -418,6 +597,9 @@ class Orchestrator:
                 or old_cfg.pause_between != new_cfg.pause_between
                 or old_cfg.max_ram_mb != new_cfg.max_ram_mb
                 or old_cfg.timeout != new_cfg.timeout
+                or old_cfg.pre_start != new_cfg.pre_start
+                or old_cfg.pre_start_timeout != new_cfg.pre_start_timeout
+                or old_cfg.pre_start_required != new_cfg.pre_start_required
             ):
                 changed.append(name)
 
