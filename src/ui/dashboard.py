@@ -125,7 +125,7 @@ def render_global_controls(state: ControlPlaneState) -> None:
     any_enabled = any(a.enabled for a in state.apps.values())
     all_enabled = all(a.enabled for a in state.apps.values()) if state.apps else False
 
-    cols = st.columns([1, 1, 1, 5])
+    cols = st.columns([1, 1, 1, 1, 4])
     with cols[0]:
         if st.button("▶ Start All", type="primary", disabled=all_enabled, use_container_width=True):
             send_command("start_all")
@@ -136,6 +136,17 @@ def render_global_controls(state: ControlPlaneState) -> None:
             st.rerun()
     with cols[2]:
         if st.button(
+            "🧹 Limpar VM",
+            type="secondary",
+            use_container_width=True,
+            help="Cleanup completo: mata órfãos (chromedriver, geckodriver, etc.), "
+                 "apaga __pycache__ de todos os apps, limpa %TEMP%, %LOCALAPPDATA%/Temp, "
+                 "C:/Windows/Temp e esvazia a Lixeira. Tipicamente 10-30s.",
+        ):
+            send_command("full_cleanup")
+            st.toast("🧹 Cleanup completo disparado — resultado aparece em até 5s")
+    with cols[3]:
+        if st.button(
             "⏻ Derrubar",
             type="secondary",
             use_container_width=True,
@@ -144,6 +155,14 @@ def render_global_controls(state: ControlPlaneState) -> None:
                  "preservado para a próxima execução.",
         ):
             st.session_state["confirm_shutdown"] = True
+
+    # Resultado do último full_cleanup (se houver)
+    if state.last_full_cleanup_at > 0:
+        when = datetime.fromtimestamp(state.last_full_cleanup_at).strftime("%H:%M:%S")
+        st.caption(
+            f"🧹 Último cleanup completo às {when}: "
+            f"**{state.last_full_cleanup_summary or '—'}**"
+        )
 
     if st.session_state.get("confirm_shutdown"):
         st.warning(
@@ -621,6 +640,27 @@ def _render_python_app_row(name: str, data: dict, state: ControlPlaneState) -> N
             help="Tempo máximo somando todos os pre_start.",
         )
 
+    # ── Cleanup pós-execução ─────────────────────────────────
+    with st.expander("🧹 Cleanup pós-execução (kill_orphans)", expanded=False):
+        st.caption(
+            "Após cada rodada deste app, o orquestrador já mata por padrão: "
+            "`chromedriver.exe`, `geckodriver.exe`, `msedgedriver.exe`, "
+            "`iedriver.exe`, `operadriver.exe`, `playwright-headless-shell.exe`. "
+            "Adicione aqui nomes extras que este app costuma deixar órfãos "
+            "(1 por linha — case-insensitive)."
+        )
+        existing_orphans = data.get("kill_orphans") or []
+        if isinstance(existing_orphans, str):
+            existing_orphans = [existing_orphans]
+        kill_orphans_text = st.text_area(
+            "Processos extras a matar (1 por linha)",
+            value="\n".join(existing_orphans),
+            key=f"py_ko_{name}",
+            height=80,
+            placeholder="node.exe\njava.exe\nphantomjs.exe",
+            help="Comparação por nome do executável (case-insensitive).",
+        )
+
     if save:
         updated = {**data, "slot": slot, "max_ram_mb": int(ram)}
         updated["schedule"] = "loop" if enabled_chk and slot != "always" else "manual"
@@ -657,6 +697,16 @@ def _render_python_app_row(name: str, data: dict, state: ControlPlaneState) -> N
             updated.pop("pre_start", None)
             updated.pop("pre_start_timeout", None)
             updated.pop("pre_start_required", None)
+        # Cleanup pós-execução — só persiste se houver nomes
+        ko_lines = [
+            line.strip()
+            for line in (kill_orphans_text or "").splitlines()
+            if line.strip()
+        ]
+        if ko_lines:
+            updated["kill_orphans"] = ko_lines
+        else:
+            updated.pop("kill_orphans", None)
         upsert_app(CONFIG_PATH, name, updated)
         st.success(f"✅ '{name}' atualizado — hot reload em até 5s")
         st.rerun()
