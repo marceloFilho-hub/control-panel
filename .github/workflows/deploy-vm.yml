@@ -18,7 +18,7 @@ jobs:
       - name: Atualizar código
         shell: powershell
         run: |
-          $repo = "C:\Users\Rotinas\Documents\Projetos\control_panel"
+          $repo = "C:\Users\Rotinas\Documents\Projetos\control-panel"
           git config --system --add safe.directory ($repo -replace '\\','/')
           Set-Location -Path $repo
           git fetch origin
