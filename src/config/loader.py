@@ -42,6 +42,13 @@ class AppConfig:
     # Se True, falha em qualquer comando do pre_start aborta a execução do
     # app. Se False, apenas loga e segue.
     pre_start_required: bool = True
+    # ── Cleanup pós-execução ────────────────────────────────
+    # Lista de nomes de processos a matar após cada rodada do app (somada
+    # à lista DEFAULT_ORPHAN_NAMES do módulo cleanup.py). Útil para apps
+    # que lançam binários adicionais via shell intermediário e que costumam
+    # escapar do Windows Job Object (ex: nodejs.exe, java.exe, edge.exe).
+    # Comparação case-insensitive. Default vazio = só os defaults.
+    kill_orphans: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -146,6 +153,7 @@ def load_config(config_path: str | Path = "config.yaml") -> ControlPlaneConfig:
             pre_start=list(app_data.get("pre_start") or []),
             pre_start_timeout=app_data.get("pre_start_timeout", 300),
             pre_start_required=app_data.get("pre_start_required", True),
+            kill_orphans=list(app_data.get("kill_orphans") or []),
         )
 
     alerts_data = raw.get("alerts", {})

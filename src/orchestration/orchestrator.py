@@ -26,6 +26,7 @@ from loguru import logger
 
 from ..config.loader import ControlPlaneConfig, load_config
 from ..observability.alerter import TelegramAlerter
+from ..process.cleanup import full_cleanup
 from ..process.git_updater import RepoInfo, discover_repo, update_repo
 from ..process.manager import ProcessManager
 from ..process.resource_monitor import get_system_metrics
@@ -673,6 +674,43 @@ class Orchestrator:
             self._reload_config()
         elif cmd.action == "shutdown":
             self._request_shutdown()
+        elif cmd.action == "full_cleanup":
+            self._run_full_cleanup()
+
+    def _run_full_cleanup(self) -> None:
+        """Cleanup pesado sob demanda — disparado pelo botão do dashboard.
+
+        Junta todos os `kill_orphans` configurados nos apps + a lista
+        default, varre `__pycache__` de todos os cwds e limpa os
+        diretórios temporários do Windows. Tipicamente leva 10-30s.
+        """
+        import os as _os
+        logger.info("FULL CLEANUP solicitado via dashboard")
+        cwds: list[Path] = []
+        extra_orphans: list[str] = []
+        for cfg in self.config.apps.values():
+            try:
+                cwds.append(Path(cfg.cwd))
+            except Exception:
+                continue
+            extra_orphans.extend(cfg.kill_orphans or [])
+
+        # Não mata o próprio orquestrador. Também preserva PIDs de apps vivos
+        # — full_cleanup é pra órfãos órfãos mesmo, não apps em execução.
+        exclude_pids: set[int] = {_os.getpid()}
+        for manager in self.managers.values():
+            if manager.is_alive() and manager.state.pid:
+                exclude_pids.add(manager.state.pid)
+
+        report = full_cleanup(
+            app_cwds=cwds,
+            extra_orphans=extra_orphans,
+            exclude_pids=exclude_pids,
+        )
+        self.state.last_full_cleanup_at = time.time()
+        self.state.last_full_cleanup_mb = report.total_freed_mb
+        self.state.last_full_cleanup_summary = report.summary()
+        save_state(self.state)
 
     def _request_shutdown(self) -> None:
         """Encerramento total solicitado pela UI.

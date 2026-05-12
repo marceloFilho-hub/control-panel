@@ -27,6 +27,9 @@ class AppState:
     fail_count: int = 0
     next_run: str = ""
     last_duration_s: float = 0.0
+    # Cleanup pós-execução (preenchido pelo ProcessManager._finalize)
+    last_cleanup_mb: float = 0.0  # MB liberados (pycache + temp)
+    last_cleanup_orphans: int = 0  # processos órfãos mortos por nome
 
 
 @dataclass
@@ -45,6 +48,10 @@ class ControlPlaneState:
     available_ram_mb: float = 0.0
     ram_safety_margin_mb: int = 512  # margem de segurança para o SO
     config_mtime: float = 0.0  # última modificação do config.yaml (para hot reload)
+    # Resultado do último full_cleanup disparado via dashboard
+    last_full_cleanup_at: float = 0.0
+    last_full_cleanup_mb: float = 0.0
+    last_full_cleanup_summary: str = ""
 
 
 # Raiz do projeto = 3 níveis acima (src/orchestration/state.py → ../../..)
@@ -106,6 +113,8 @@ def load_state() -> ControlPlaneState:
             fail_count=app_data.get("fail_count", 0),
             next_run=app_data.get("next_run", ""),
             last_duration_s=app_data.get("last_duration_s", 0.0),
+            last_cleanup_mb=app_data.get("last_cleanup_mb", 0.0),
+            last_cleanup_orphans=app_data.get("last_cleanup_orphans", 0),
         )
 
     return ControlPlaneState(
@@ -123,6 +132,9 @@ def load_state() -> ControlPlaneState:
         available_ram_mb=raw.get("available_ram_mb", 0.0),
         ram_safety_margin_mb=raw.get("ram_safety_margin_mb", 512),
         config_mtime=raw.get("config_mtime", 0.0),
+        last_full_cleanup_at=raw.get("last_full_cleanup_at", 0.0),
+        last_full_cleanup_mb=raw.get("last_full_cleanup_mb", 0.0),
+        last_full_cleanup_summary=raw.get("last_full_cleanup_summary", ""),
     )
 
 
@@ -148,7 +160,7 @@ def read_commands(commands_dir: Path | None = None) -> list[Command]:
     for f in d.glob("*.trigger"):
         stem = f.stem
         # Parse: action_appname ou action (global)
-        if stem in ("start_all", "stop_all", "reload", "shutdown"):
+        if stem in ("start_all", "stop_all", "reload", "shutdown", "full_cleanup"):
             commands.append(Command(action=stem))
         elif "_" in stem:
             action, app_name = stem.split("_", 1)

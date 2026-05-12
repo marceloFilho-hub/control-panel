@@ -22,6 +22,7 @@
 - [Auto-update via git](#auto-update-via-git)
 - [Orquestração e filas](#orquestração-e-filas)
 - [Cleanup e Job Objects](#cleanup-e-job-objects)
+- [Cleanup pós-execução e da VM](#cleanup-pós-execução-e-da-vm)
 - [Persistência](#persistência)
 - [Hot reload](#hot-reload)
 - [Logs e observabilidade](#logs-e-observabilidade)
@@ -329,6 +330,7 @@ apps:
 | `pre_start` | list[str] | `[]` | Comandos shell sequenciais executados no `cwd` antes do app — suporta `{python}`/`{pip}` |
 | `pre_start_timeout` | int (segundos) | 300 | Timeout cumulativo para os `pre_start` |
 | `pre_start_required` | bool | true | Se true, falha em qualquer `pre_start` aborta a rodada; se false, apenas loga |
+| `kill_orphans` | list[str] | `[]` | Nomes de processos extras (case-insensitive) a matar após cada rodada deste app, além dos drivers default — ver [Cleanup pós-execução](#cleanup-pós-execução-e-da-vm) |
 
 > O campo `git_pull: true` por app é **deprecated** e ignorado em runtime.
 > Auto-update via git agora é controlado em `settings.auto_update` (ver
@@ -485,6 +487,91 @@ creationflags = (
 ```
 
 Para GUIs, o cleanup é via `psutil.kill_process_tree()` ao fechar a janela.
+
+---
+
+## Cleanup pós-execução e da VM
+
+O Job Object cobre 99% dos casos, mas após dias de uso a VM ainda
+acumulava lixo: drivers Selenium/Playwright que escapavam do Job,
+pastas `__pycache__` espalhadas pelos repos atualizados via auto-update,
+e o próprio `%TEMP%` crescendo sem limite. Em produção, uma VM com 10 GB
+livres chegava a ~1 GB em 24h.
+
+O módulo `src/process/cleanup.py` resolve isso em duas frentes.
+
+### Cleanup automático por rodada (per-app)
+
+Após o `_finalize()` matar a árvore do app, o orquestrador chama
+`per_app_cleanup(app)`, que faz:
+
+1. **Kill por nome** dos drivers default (`DEFAULT_ORPHAN_NAMES`):
+   - `chromedriver.exe`, `geckodriver.exe`, `msedgedriver.exe`,
+     `iedriver.exe`, `operadriver.exe`, `playwright-headless-shell.exe`
+   - Somados aos nomes extras declarados em `kill_orphans` do app.
+2. **Purga `__pycache__`** recursiva no `cwd` do app, pulando pastas
+   pesadas/protegidas: `.venv`, `.git`, `node_modules`, `site-packages`.
+
+**Não toca em `%TEMP%` nem na Lixeira** — o custo por rodada precisa ser
+baixo. Essa limpeza profunda fica para o cleanup completo (abaixo).
+
+As métricas da última execução ficam no `AppState`:
+
+- `last_cleanup_mb` — MB liberados pelo `__pycache__` purgado
+- `last_cleanup_orphans` — quantos drivers órfãos foram mortos
+
+#### Configurando `kill_orphans` por app
+
+```yaml
+apps:
+  meu_robo_selenium:
+    cmd: '"...\python.exe" "src/main.py"'
+    cwd: C:/proj/meu_robo
+    kill_orphans:
+      - "minha_extensao.exe"   # case-insensitive
+      - "headless_helper.exe"
+```
+
+Também editável pela UI: aba **⚙️ Configurar** → expander
+**🧹 Cleanup pós-execução** em cada card de app.
+
+### Cleanup completo sob demanda (botão "🧹 Limpar VM")
+
+A aba **Status** do dashboard tem um botão **🧹 Limpar VM** que dispara
+`full_cleanup()`:
+
+1. Mata órfãos do `DEFAULT_ORPHAN_NAMES` **+ união** dos `kill_orphans`
+   de todos os apps configurados.
+2. Apaga `__pycache__` de **todos** os `cwd` registrados no `config.yaml`.
+3. Limpa `%TEMP%`, `%LOCALAPPDATA%\Temp` e `C:\Windows\Temp` removendo
+   apenas arquivos com `mtime > 5 min` — janela de segurança para não
+   pisar em apps rodando que estão escrevendo arquivos temporários.
+4. Esvazia a Lixeira do Windows via PowerShell `Clear-RecycleBin -Force`.
+
+**Não mexe com standby memory.** Limpar standby exige privilégio de
+admin (`SeProfileSingleProcessPrivilege` via `EmptyStandbyList.exe` ou
+similar) — decisão arquitetural foi evitar elevação para manter o painel
+rodável como usuário comum.
+
+O resultado aparece no rodapé da aba Status como:
+
+```
+🧹 Último cleanup completo às 14:32:07: 23 órfãos mortos · 412 MB libertos
+```
+
+### API do módulo
+
+```python
+from src.process.cleanup import (
+    DEFAULT_ORPHAN_NAMES,    # tupla com os 6 drivers default
+    per_app_cleanup,         # chamado em _finalize por app
+    full_cleanup,            # acionado pelo botão "Limpar VM"
+    kill_orphans_by_name,    # mata processos por nome (case-insensitive)
+    purge_pycache,           # remove __pycache__ recursivo
+    purge_temp_dirs,         # %TEMP%, %LOCALAPPDATA%\Temp, C:\Windows\Temp
+    clear_recycle_bin,       # PowerShell Clear-RecycleBin -Force
+)
+```
 
 ---
 
@@ -669,6 +756,13 @@ Ao clicar, aparece confirmação inline; confirmando, o orquestrador:
 **O `config.yaml` é preservado intacto** — nenhuma rota de shutdown o
 modifica. Para reiniciar, use o atalho do desktop ou `python -m src.main`.
 
+### Botão "🧹 Limpar VM"
+
+Ao lado do Derrubar, dispara `full_cleanup()` síncrono no contexto do
+Streamlit (não passa por arquivo `.trigger`, é chamada direta). Mata
+órfãos, purga `__pycache__` de todos os apps, limpa `%TEMP%` e Lixeira.
+Detalhes na seção [Cleanup pós-execução e da VM](#cleanup-pós-execução-e-da-vm).
+
 ---
 
 ## Estrutura do projeto
@@ -700,7 +794,9 @@ control_panel/
 │   │   ├── manager.py           #   subprocess + monitoramento + cleanup
 │   │   ├── python_runner.py     #   detecta .venv/.env de projetos Python
 │   │   ├── windows_job.py       #   wrapper Windows Job Objects (pywin32)
-│   │   └── resource_monitor.py  #   psutil (RAM/CPU/kill_tree)
+│   │   ├── resource_monitor.py  #   psutil (RAM/CPU/kill_tree)
+│   │   ├── git_updater.py       #   auto-update git pré-rodada
+│   │   └── cleanup.py           #   per_app_cleanup + full_cleanup (VM)
 │   │
 │   ├── observability/           # 👁 logs e alertas
 │   │   ├── logger.py            #   ExecutionLogger + history.jsonl
@@ -878,6 +974,25 @@ Se persistir: reduza `run_every` para 5 em `_status_fragment`.
 - Confirme que `_finalize()` foi chamado (veja log "Cleanup: N proc(s)")
 - Verifique apps `gui: true`: eles não usam Job Object, cleanup via psutil
 - Failsafe: `taskkill /F /T /PID <pid>` manualmente
+
+### VM enche de lixo após dias de uso
+
+Sintoma: disco livre caindo de ~10 GB para ~1 GB em 24h, RAM com muito
+"em uso" mesmo sem apps ativos. Causas comuns:
+
+- **Drivers Selenium/Playwright órfãos** (chromedriver, geckodriver,
+  msedgedriver, playwright-headless-shell): escapam do Job Object quando
+  o app spawna o driver via biblioteca que dispara `CREATE_BREAKAWAY_FROM_JOB`.
+  O `per_app_cleanup` já mata os nomes padrão após cada rodada — se seu
+  app usa um driver/extensão custom, adicione em `kill_orphans` no config.
+- **`__pycache__` acumulado** em repos atualizados via auto-update:
+  cada `git reset --hard` invalida bytecode antigo mas não apaga. Resolvido
+  pelo `purge_pycache` em `per_app_cleanup`.
+- **`%TEMP%` lotado**: apps que baixam planilhas/PDFs e nunca limpam.
+  Use o botão **🧹 Limpar VM** na aba Status (só remove arquivos com
+  `mtime > 5 min`, então é seguro mesmo com apps rodando).
+- **Lixeira do Windows cheia**: alguns apps usam `send2trash`. O botão
+  Limpar VM esvazia via `Clear-RecycleBin -Force`.
 
 ### App falha com "Hook pré-execução: ..."
 

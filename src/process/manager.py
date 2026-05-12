@@ -14,6 +14,7 @@ from ..config.loader import AppConfig
 from ..observability.alerter import TelegramAlerter
 from ..observability.logger import ExecutionLogger
 from ..orchestration.state import AppState
+from .cleanup import per_app_cleanup
 from .python_runner import load_env_file
 from .resource_monitor import get_process_metrics, get_system_metrics, kill_process_tree
 from .windows_job import JobObject
@@ -350,11 +351,32 @@ class ProcessManager:
                 kill_process_tree(self.state.pid)
                 killed_count += 1
 
-        # 3) Forçar GC do orchestrator (libera memória Python residual)
+        # 3) Cleanup pós-execução (órfãos por nome + __pycache__ do cwd).
+        #    Resolve o lixo que escapa do Job Object: chromedriver/geckodriver
+        #    lançados via shell intermediário, .pyc gerados pelo app, etc.
+        #    Não toca em %TEMP% nem na Lixeira — esses só no full_cleanup.
+        try:
+            cwd_path = Path(self.cfg.cwd)
+            # Exclui o PID do próprio orquestrador da lista de mortes — paranoia
+            exclude = {os.getpid()}
+            report = per_app_cleanup(
+                self.cfg.name,
+                cwd_path,
+                extra_orphans=list(self.cfg.kill_orphans),
+                exclude_pids=exclude,
+            )
+            # Expõe a métrica no state pra dashboard
+            self.state.last_cleanup_mb = report.total_freed_mb
+            self.state.last_cleanup_orphans = report.orphans_killed
+        except Exception as e:
+            logger.warning(f"[{self.cfg.name}] per_app_cleanup falhou: {e}")
+
+        # 4) gc.collect() já foi chamado dentro de per_app_cleanup, mas
+        #    rodamos de novo aqui pra liberar o que sobrou da própria função.
         import gc
         gc.collect()
 
-        # 4) Log
+        # 5) Log
         ram_after = get_system_metrics()["available_ram_mb"]
         freed = ram_after - ram_before
         if killed_count > 0 or freed > 10:
